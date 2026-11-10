@@ -1,0 +1,5 @@
+build/
+*.dll
+*.exe
+*.log
+model/build/

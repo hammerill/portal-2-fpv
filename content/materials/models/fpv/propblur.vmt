@@ -1,0 +1,6 @@
+"VertexLitGeneric"
+{
+	"$basetexture" "models/fpv/propblur"
+	"$translucent" "1"
+	"$nocull" "1"
+}
