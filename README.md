@@ -61,13 +61,14 @@ drone's, and the binding is given back when the mod unloads.
 
 ## Installing
 
-1. Copy the release's `portal2` folder into
-   `Steam/steamapps/common/Portal 2/` (it adds `portal2/addons/portal2-fpv*`,
-   `portal2/models/fpv` and `portal2/materials/models/fpv`).
-2. Start Portal 2, load a chamber, press F7.
+Follow the install guide on the
+[latest release](https://github.com/hammerill/portal-2-fpv/releases/latest):
+one ZIP, extracted into the `Portal 2` folder.
 
-Portal 2 loads the plugin by itself from `portal2/addons/portal2-fpv.vdf`.
-Single player only. To uninstall, delete those files.
+Every push to `main` publishes a new release
+(`.github/workflows/release.yml`), built with the latest libfpv; its page
+is [docs/INSTALL.md](docs/INSTALL.md). Run the workflow by hand from the
+Actions tab to pick up a new libfpv without a mod change.
 
 ## Building
 
