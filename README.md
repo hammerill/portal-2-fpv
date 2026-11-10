@@ -1,5 +1,7 @@
 # Portal 2 FPV
 
+<p><img src="portal-2-fpv.gif" alt="Portal 2 FPV" width=512></p>
+
 Fly a real FPV quadcopter through Aperture's test chambers with your own radio,
 and solve them with it: fire portals from the drone, press buttons, carry
 cubes to buttons, fly through your portals with all your momentum, ride faith
