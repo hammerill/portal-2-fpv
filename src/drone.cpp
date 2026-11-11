@@ -11,7 +11,9 @@
 #include "crash.h"
 #include "fpvapi.h"
 #include "gameplay.h"
+#include "kamikaze.h"
 #include "log.h"
+#include "pilot.h"
 #include "render.h"
 #include "world.h"
 
@@ -120,6 +122,9 @@ void forward_keys() {
         {VK_RETURN, FPV_KEY_ENTER, 0, true}, {VK_LEFT, FPV_KEY_LEFT, 0, true}, {VK_RIGHT, FPV_KEY_RIGHT, 0, true},
         {VK_UP, FPV_KEY_UP, 0, true}, {VK_DOWN, FPV_KEY_DOWN, 0, true}, {VK_F8, FPV_KEY_F8}, {VK_ESCAPE, FPV_KEY_ESCAPE},
         {VK_TAB, FPV_KEY_TAB}, {VK_BACK, FPV_KEY_BACKSPACE}, {VK_SPACE, FPV_KEY_SPACE}, {VK_DELETE, FPV_KEY_DELETE},
+#if defined(LIBFPV_KAMIKAZE)
+        {0, 'K', 0x25, true}, {0, 'X', 0x2D, true},  // bomb arm, explode
+#endif
     };
     bool flight_keys = (g_drone && !g_pilot) || fpv.fpv_overlay_wants_input();
     static bool was_down[sizeof(keys) / sizeof(keys[0])];
@@ -156,10 +161,10 @@ int letter_vk(UINT scan) {
 void hide_hud(bool hide) {
     if (hide == g_hud_hidden) return;
     g_hud_hidden = hide;
-    for (const char *c : {"cl_drawhud", "r_drawviewmodel", "thirdperson", "firstperson", "crosshair"}) sdk::uncheat(c);
-    // thirdperson: Chell is drawn, so the drone sees its pilot
-    if (hide) sdk::exec("cl_drawhud 0; r_drawviewmodel 0; crosshair 0; thirdperson");
-    else sdk::exec("firstperson; cl_drawhud 1; r_drawviewmodel 1; crosshair 1");
+    for (const char *c : {"cl_drawhud", "r_drawviewmodel", "crosshair"}) sdk::uncheat(c);
+    // Chell herself is hidden for the whole flight (pilot.cpp)
+    if (hide) sdk::exec("cl_drawhud 0; r_drawviewmodel 0; crosshair 0");
+    else sdk::exec("cl_drawhud 1; r_drawviewmodel 1; crosshair 1");
 }
 
 bool chell_alive() {
@@ -211,14 +216,14 @@ void report_view() {
     }
 }
 
-// Where the drone launches: on the floor in front of Chell, facing her way.
+// Where the drone launches: on the floor in front of the pilot, facing her way.
 bool launch_pose(float pos[3], float rot[4]) {
     void *p = sdk::player();
     if (!p) return false;
     QAngle eye = sdk::view_angles();
     Vector f, r, u;
     sdk::angle_vectors({0, eye.yaw, 0}, &f, &r, &u);
-    Vector feet = chell_feet();
+    Vector feet = pilot::spot();
     Vector want = feet + f * kLaunchDistance + Vector{0, 0, 24};
     // not into a wall in front of her
     sdk::CGameTrace tr;
@@ -278,6 +283,7 @@ void launch() {
     crash::note("launch: gameplay::on_launch");
     fpvlog::write("launch: gameplay::on_launch");
     gameplay::on_launch(pos);
+    pilot::begin();
     sdk::exec("playgamesound GameUI.ButtonClickSound");
     fpvlog::write("drone: launched at %.0f %.0f %.0f", pos[0], pos[1], pos[2]);
 }
@@ -290,6 +296,7 @@ void back_to_drone() {
 }
 
 void to_pilot() {
+    pilot::home();
     g_pilot = true;
     hide_hud(false);
     sdk::set_view_angles(g_hold_angles);
@@ -308,6 +315,8 @@ void move_chell_here() {
     sdk::trace_ray(at + Vector{0, 0, 8}, at - Vector{0, 0, 400}, sdk::MASK_SOLID, &filter, tr);
     Vector feet = tr.fraction < 1 ? tr.endpos + Vector{0, 0, 2} : at;
     QAngle a = sdk::vectors_angles(Vector(g_frame.camera.forward), Vector(g_frame.camera.up));
+    pilot::release();
+    kamikaze::cancel();
     sdk::execf("script p2fpv_move_player(%.2f, %.2f, %.2f)", feet.x, feet.y, feet.z);
     stop();
     sdk::set_view_angles({0, a.yaw, 0});
@@ -342,13 +351,14 @@ float source_fov(const fpv_camera &c, float aspect, bool lens) {
 }
 
 void apply_camera(sdk::CViewSetup *v) {
-    const fpv_camera &c = g_view == View::Chase ? g_frame.chase_camera : g_view == View::Los ? g_frame.los_camera : g_frame.camera;
+    View view = kamikaze::cutscene() ? View::Los : g_view;  // the blast, seen from the pilot
+    const fpv_camera &c = view == View::Chase ? g_frame.chase_camera : view == View::Los ? g_frame.los_camera : g_frame.camera;
     Vector pos(c.position), f(c.forward), u(c.up);
     float aspect = v->height > 0 ? float(v->width) / float(v->height) : render::aspect();
     v->origin = pos;
     v->angles = sdk::vectors_angles(f, u);
-    v->fov = source_fov(c, aspect, g_view == View::Fpv);
-    v->zNear = g_view == View::Fpv ? world::near_plane(pos, f, u, aspect, c.fov_y_degrees) : 2.0f;
+    v->fov = source_fov(c, aspect, view == View::Fpv);
+    v->zNear = view == View::Fpv ? world::near_plane(pos, f, u, aspect, c.fov_y_degrees) : 2.0f;
 }
 
 void snapshot() {
@@ -390,6 +400,8 @@ bool load_libfpv() {
     if (!fpvapi::load(g_log)) return false;
     crash::note("declare_controls");
     gameplay::declare_controls();
+    pilot::declare();
+    kamikaze::declare();
     fpv.fpv_overlay_set_action(kMoveChellAction, "Move Chell here (Y)");
     crash::note("libfpv ready");
     return true;
@@ -412,6 +424,8 @@ void start() {
 
 void stop() {
     if (!g_drone) return;
+    kamikaze::cancel();
+    pilot::end();
     gameplay::on_stop();
     audio::stop();
     fpv.fpv_audio_set_listener(nullptr, nullptr);
@@ -429,10 +443,13 @@ void stop() {
 void respawn() {
     if (!g_drone) return;
     float pos[3], rot[4];
-    if (!launch_pose(pos, rot)) return;
+    if (!launch_pose(pos, rot)) return;  // in front of the spot, before she goes back to it
+    kamikaze::cancel();
+    pilot::home();
     gameplay::on_respawn();
     fpv.fpv_drone_repair(g_drone);
     fpv.fpv_drone_reset(g_drone, pos, rot);
+    pilot::spot().to(pos);
     fpv.fpv_drone_set_pilot_position(g_drone, pos);
     g_first_sim = -1;
     g_warm = false;
@@ -514,7 +531,7 @@ void on_view(sdk::CViewSetup *view) {
 
     if (g_drone && !sdk::is_paused()) {
         float feet[3];
-        chell_feet().to(feet);
+        pilot::spot().to(feet);
         fpv.fpv_drone_set_pilot_position(g_drone, feet);
         world::before_tick(dt);
         fpv_frame f{};
@@ -530,7 +547,11 @@ void on_view(sdk::CViewSetup *view) {
         g_age += dt;
         update_listener();
         // not on the frame from before a respawn (it is kept for the camera while the new one warms up)
-        if (g_have_frame && g_warm) gameplay::client_tick(g_frame, dt, drone_view() && !typing && game_has_focus());
+        if (g_have_frame && g_warm) {
+            gameplay::client_tick(g_frame, dt, drone_view() && !typing && game_has_focus());
+            if (g_drone) pilot::frame(g_frame, drone_view());
+            if (g_drone) kamikaze::frame(g_frame, dt);
+        }
     }
     if (g_drone && g_have_frame) {
         if (!g_pilot) apply_camera(view);

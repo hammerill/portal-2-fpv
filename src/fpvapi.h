@@ -20,19 +20,33 @@ namespace fpvapi {
     X(fpv_overlay_render) X(fpv_overlay_set_action) X(fpv_overlay_poll_action) X(fpv_osd_draw_data) \
     X(fpv_audio_configure) X(fpv_audio_read) X(fpv_audio_set_listener) X(fpv_set_view)            \
     X(fpv_gps_set_home) X(fpv_wind_defaults) X(fpv_wind_set) X(fpv_wind_set_sources)              \
-    X(fpv_wind_add_blast) X(fpv_shared_data_dir) X(fpv_pilot_set_support)
+    X(fpv_wind_add_blast) X(fpv_shared_data_dir) X(fpv_pilot_set_support) X(fpv_pilot_get_config)
+
+// Local kamikaze builds only (src/kamikaze.h).
+#if defined(LIBFPV_KAMIKAZE)
+#define FPV_KAMIKAZE_FUNCTIONS(X) \
+    X(fpv_kamikaze_poll_detonation) X(fpv_kamikaze_get_config) X(fpv_kamikaze_set_ending_support) \
+    X(fpv_kamikaze_set_installed) X(fpv_kamikaze_is_installed) X(fpv_kamikaze_detonate)
+#else
+#define FPV_KAMIKAZE_FUNCTIONS(X)
+#endif
 
 struct Api {
 #define FPV_FN(name) decltype(&::name) name = nullptr;
     FPV_FUNCTIONS(FPV_FN)
+    FPV_KAMIKAZE_FUNCTIONS(FPV_FN)
 #undef FPV_FN
 };
 
 extern Api fpv;
 
 // Loads and initialises libfpv once; later calls return the first result.
+// A libfpv already running in the game (a core reload) is picked up, or
+// replaced if a newer build is on disk (libfpv-live\, see fpvapi.cpp).
 bool load(fpv_log_fn log);
 bool loaded();
+// Some libfpv runs in this process (loaded and initialised by an earlier core).
+bool running();
 
 // Portal 2's world: X forward (north), Z up, Y left; inches.
 constexpr float kUnitsPerMeter = 39.37f;

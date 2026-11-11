@@ -11,7 +11,9 @@
 #include "drone.h"
 #include "fpvapi.h"
 #include "gameplay.h"
+#include "kamikaze.h"
 #include "log.h"
+#include "pilot.h"
 #include "render.h"
 #include "sdk.h"
 #include "world.h"
@@ -73,9 +75,14 @@ bool start() {
     }
     drone::load(g_ctx.libfpv_log);
     take_f7(true);
+    // no flight yet: Chell is drawn (an earlier core may have gone with her hidden)
+    sdk::exec("ent_fire !player EnableDraw");
     // after a hot reload libfpv is still loaded and initialised: pick it up
-    if (GetModuleHandleA("libfpv.dll") && fpvapi::load(g_ctx.libfpv_log)) {
+    // (or a newer build in its place)
+    if (fpvapi::running() && fpvapi::load(g_ctx.libfpv_log)) {
         gameplay::declare_controls();
+        pilot::declare();
+        kamikaze::declare();
         fpvapi::fpv.fpv_overlay_set_action(1, "Move Chell here (Y)");
     }
     g_ready = true;

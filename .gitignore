@@ -3,3 +3,5 @@ build/
 *.exe
 *.log
 model/build/
+build-kamikaze/
+tools/deploy.local.sh

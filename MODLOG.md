@@ -92,6 +92,31 @@ docs/INTEGRATION.md or libfpv.h, those win.
   SetOrigin/SetAngles/SetVelocity, EntFireByHandle. The console splits on ';',
   so the mod writes scripts/vscripts/p2fpv.nut with one helper per action.
 
+- Player flags (m_fFlags): FL_NOTARGET is 0x8000 here (Source 2013's 1<<15
+  shifted by FL_ANIMDUCKING); writing it on the server makes AI ignore her.
+  m_takedamage 0 = no damage. (Neither is used: the stand-in is targeted
+  and hurt like Chell, the damage goes to the drone.)
+- AI aims at a player at origin + m_vecViewOffset * 0.7..1.0
+  (CBasePlayer::BodyTarget), and the server's PVS is from origin + view
+  offset. Writing m_vecViewOffset alone doesn't last: the player's movement
+  resets it to the game's view vectors (CViewVectors::m_vView, server.dll
+  data, found by its floats 0 0 64 / -16 -16 0 / 16 16 72) every tick.
+  Patching m_vView itself holds (server and client see it).
+- tools/deploy.sh used to hide a failed build and deploy the old core: it
+  now stops. The `noclip` command's handler checks
+  sv_cheats itself (clearing FCVAR_CHEAT is not enough), but writing
+  m_MoveType (8 noclip, 2 walk) works and the client follows.
+- `DisableDraw` / `EnableDraw` inputs work on the player (EF_NODRAW, also in
+  portal views) and on her portal gun (VScript GetOwner() finds it).
+- The player's hull touches triggers wherever the server puts her (VScript
+  SetOrigin every tick, noclip): a door's proximity trigger opens it.
+- `map` from the bridge while in a level drops the game to the menu (a
+  network message dump in the console); from the menu it loads fine.
+- A libfpv can't be unloaded (it pins itself) or replaced on disk while it
+  runs, but `fpv_global_terminate` stops its threads, the Configurator
+  server and SDL; a copy under another file name then starts fresh in the
+  same process (its own globals, Betaflight included).
+
 ## Log
 
 - 2026-11-10: libfpv extended and tested (Linux 41 tests / 794 checks,
@@ -122,13 +147,38 @@ docs/INTEGRATION.md or libfpv.h, those win.
   fizzler (respawn). Dev: autotest words f8, at=x,y,z[,yaw]; status lists
   lasers and funnels.
 
+- 2026-11-11, in the running game (no restart): libfpv swapped live
+  (libfpv-live/, fpvapi.cpp). libfpv: game controls are INSTANT (default:
+  once per press; on a radio switch once per flip, either way), HOLD or
+  SWITCH, the setup's "It's a button" box and its hints say so; cargo on a
+  winch line (its own body; the rigid cargo's inertia made the quad
+  unflyable and its sphere started in the floor). Verified by script:
+  a cube lifted on the line in angle mode at 0.35 kg, level and steady;
+  the stand-in (Chell hidden, noclip, notarget, no damage, carried 12
+  units above the drone) opens sp_a2_dual_lasers' entrance door from the
+  arrival elevator and brings her back to her spot (on the elevator's
+  floor brush, which moves).
+
+- 2026-11-11, later: objects flickered during the stand-in (her eye, 76
+  units above the drone, was inside ceilings: the PVS from there dropped
+  them). Her eye is now the drone's centre (the first try only wrote her
+  view offset, which the game reset every tick: the view vectors are
+  patched now). The stand-in no longer makes
+  her notarget or immune: turrets target the drone (Chell) and shoot at its
+  exact position; her lost health breaks the drone's props. Game controls
+  on a radio switch: hysteresis and a 30 ms debounce (a switch held ON
+  fired by itself). Not checked in game yet: turrets against the stand-in.
+
 ## Next — start here
 
 In game, with the hot reloader (tools/deploy.sh core, tools/p2.sh). After a
 game restart the bridge works from the main menu: `tools/p2.sh cmd "map X"`.
 1. Done: plugin, cameras, OSD/fisheye/overlay, collision, portals (fire and
-   pass), use, grab, floor/pedestal buttons, lasers, turrets, faith plates,
-   funnels, fizzlers, goo.
+   pass), use, grab (on a line), floor/pedestal buttons, lasers, turrets,
+   faith plates, funnels, fizzlers, goo, the stand-in (doors).
+   Not checked yet: a stand-in Chell over a floor button (her feet are 12
+   units above the drone so a landed drone doesn't press it), the line
+   through a portal, grab on a radio switch by hand.
 2. By hand (the user): the keys F / C / R / Y, the overlay's controls page,
    a radio with the game controls on its switches.
 3. Not verified: a cube fizzled while carried (same Dissolve path as

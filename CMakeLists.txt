@@ -10,6 +10,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LIBFPV_DIR "$ENV{HOME}/Projects/libfpv" CACHE PATH "libfpv source checkout")
 set(LIBFPV_BUILD "${LIBFPV_DIR}/build/win32" CACHE PATH "libfpv i686 build dir")
+# Local development builds only (tools/deploy.sh), never CI or releases: must
+# match a libfpv built with -DLIBFPV_KAMIKAZE=ON (the frame's layout changes).
+option(P2FPV_KAMIKAZE "Local dev build against a kamikaze libfpv" OFF)
 
 # portal2-fpv.dll: the server plugin Portal 2 loads (addons/portal2-fpv.vdf).
 # It owns the log and the D3D9 hook, and hot-reloads the core.
@@ -32,6 +35,8 @@ add_library(p2fpv_core SHARED
   src/drone.cpp
   src/world.cpp
   src/gameplay.cpp
+  src/pilot.cpp
+  src/kamikaze.cpp
   src/devtools.cpp
   src/log.cpp
   src/paths.cpp
@@ -44,6 +49,9 @@ foreach(target p2fpv_loader p2fpv_core)
   target_include_directories(${target} PRIVATE src "${LIBFPV_DIR}/include")
   # libfpv.dll is loaded at runtime; the header is only used for declarations.
   target_compile_definitions(${target} PRIVATE LIBFPV_STATIC WIN32_LEAN_AND_MEAN NOMINMAX)
+  if(P2FPV_KAMIKAZE)
+    target_compile_definitions(${target} PRIVATE LIBFPV_KAMIKAZE)
+  endif()
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type)
   target_link_options(${target} PRIVATE -static)
 endforeach()

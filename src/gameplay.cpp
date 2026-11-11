@@ -11,8 +11,10 @@
 
 #include "drone.h"
 #include "fpvapi.h"
+#include "kamikaze.h"
 #include "log.h"
 #include "paths.h"
+#include "pilot.h"
 #include "world.h"
 
 namespace gameplay {
@@ -35,7 +37,7 @@ const char *const kPlaceholderModel = "models/props_junk/garbage_coffeemug001a_f
 const char *const kModelName = "p2fpv_model";
 const char *const kEyeName = "p2fpv_eye";  // npc_bullseye: what turrets aim at
 const char *const kRelName = "p2fpv_rel";  // ai_relationship: turrets hate it
-constexpr float kEyeBehind = 6;            // units behind the centre, clear of the lens
+constexpr float kEyeBehind = 0;            // at the centre: bullets aimed at the drone hit it
 constexpr int kEyeHealth = 100000;
 
 uint32_t g_model = 0xFFFFFFFFu, g_eye = 0xFFFFFFFFu, g_rel = 0xFFFFFFFFu;
@@ -43,14 +45,18 @@ std::string g_status = "idle";
 
 // --- carried cargo ---------------------------------------------------------------------------
 
-constexpr float kCargoMassKg = 0.3f;  // a test cube, as far as the motors can tell
-constexpr float kGrabReach = 28;      // units between the drone and the cube's surface
+// The cube hangs on a winch line under the drone (libfpv's cargo on a line):
+// a body of its own, so the quad keeps its inertia and stays flyable, and
+// the pilot feels the weight and the swing.
+constexpr float kCargoMassKg = 0.35f;  // a test cube, as far as the motors can tell
+constexpr float kGrabReach = 40;       // units between the drone and the cube's surface
+constexpr float kLineSlack = 4;        // units of line between the hook and the cube's top
 
 struct Carried {
     uint32_t handle = 0xFFFFFFFFu;
-    Vector offset;      // drone-local (host axes), units
-    QAngle angles;      // the cube's at the pickup
-    float drone_yaw = 0;
+    float yaw = 0;        // the cube's heading relative to the drone's, at the pickup
+    Vector up{0, 0, 1};   // the cube's up axis, eased towards the line
+    Vector pos, vel;      // libfpv's, this frame
     bool active = false;
 } g_cargo;
 
@@ -66,6 +72,7 @@ Vector g_drone_pos, g_drone_vel;
 float g_drone_q[4] = {0, 0, 0, 1};
 bool g_fizzle = false;  // fizzled this tick: respawn at Chell next frame
 bool g_drowned = false;  // fell in goo (a lethal trigger_hurt) or out of the world: the same
+bool g_wrecked = false;  // a kamikaze build's drone after its warhead went off: not drawn, nothing reacts
 
 // A faith plate's flight: Portal's plates fly an exact arc (the player has no
 // air control on it); the drone has drag, so it is held on the arc until it
@@ -84,6 +91,12 @@ Vector qrot(const float q[4], const Vector &v) {
     float s = q[3];
     return u * (2.0f * u.dot(v)) + v * (s * s - u.dot(u)) + u.cross(v) * (2.0f * s);
 }
+// The model's nose is along its +Y axis: the entity is yawed 90 degrees right
+// of the drone (its +X on the drone's right side) so the nose points forward.
+QAngle model_angles(const float q[4]) {
+    return sdk::vectors_angles(qrot(q, {0, -1, 0}), qrot(q, {0, 0, 1}));
+}
+
 Vector qrot_inv(const float q[4], const Vector &v) {
     float c[4] = {-q[0], -q[1], -q[2], q[3]};
     return qrot(c, v);
@@ -132,11 +145,20 @@ const char *const kScript = R"NUT(// portal2-fpv: helpers the plugin calls with 
     local e = Entities.FindByName(null, name)
     if (e) e.EmitSound(sound)
 }
+::p2fpv_draw_player <- function(on) {
+    local input = on ? "EnableDraw" : "DisableDraw"
+    EntFireByHandle(GetPlayer(), input, "", 0, null, null)
+    local g = null
+    while (g = Entities.FindByClassname(g, "weapon_portalgun"))
+        if (g.GetOwner() == GetPlayer() || g.GetMoveParent() == GetPlayer()) EntFireByHandle(g, input, "", 0, null, null)
+}
 ::p2fpv_move_player <- function(x, y, z) {
     GetPlayer().SetOrigin(Vector(x, y, z))
     GetPlayer().SetVelocity(Vector(0, 0, 0))
 }
 )NUT";
+
+}  // namespace
 
 void install_script() {
     std::string path = game_dir() + "\\scripts\\vscripts\\p2fpv.nut";
@@ -158,6 +180,8 @@ void install_script() {
     }
     sdk::exec("script_execute p2fpv");
 }
+
+namespace {
 
 void *entity(uint32_t h) { return sdk::entity_from_handle(h); }
 
@@ -381,7 +405,7 @@ void drop(bool fizzled = false) {
     } else {
         sdk::execf("script p2fpv_fire_nearest(\"%s\", %.2f, %.2f, %.2f, \"EnableMotion\", \"\")", cls, o.x, o.y, o.z);
         sdk::execf("script p2fpv_velocity_nearest(\"%s\", %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, false)", cls, o.x, o.y,
-                   o.z, g_drone_vel.x, g_drone_vel.y, g_drone_vel.z);
+                   o.z, g_cargo.vel.x, g_cargo.vel.y, g_cargo.vel.z);
     }
     g_status = fizzled ? "cargo fizzled" : "dropped";
     fpvlog::write("gameplay: %s %s", g_status.c_str(), cls);
@@ -402,30 +426,50 @@ void grab(const fpv_frame &f) {
         return;
     }
     Vector o = sdk::abs_origin(best);
+    // the cube's centre (a prop's origin may be at its base)
+    Vector lo = sdk::get<Vector>(best, "m_Collision.m_vecMins"), hi = sdk::get<Vector>(best, "m_Collision.m_vecMaxs");
+    Vector centre = o + (lo + hi) * 0.5f;
+    // a sphere as wide as the cube's half side: it rests on its faces, not its corners
+    float half = std::min({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z}) * 0.5f;
+    if (half < 4) half = entity_radius(best) * 0.6f;
     g_cargo.handle = sdk::handle_of(best);
-    g_cargo.offset = qrot_inv(f.rotation, o - at);
-    g_cargo.angles = sdk::abs_angles(best);
-    g_cargo.drone_yaw = sdk::vectors_angles(qrot(f.rotation, {1, 0, 0}), qrot(f.rotation, {0, 0, 1})).yaw;
+    float drone_yaw = sdk::vectors_angles(qrot(f.rotation, {1, 0, 0}), qrot(f.rotation, {0, 0, 1})).yaw;
+    QAngle a = sdk::abs_angles(best);
+    g_cargo.yaw = a.yaw - drone_yaw;
+    sdk::angle_vectors(a, nullptr, nullptr, &g_cargo.up);
+    g_cargo.pos = centre;
+    g_cargo.vel = Vector{};
     g_cargo.active = true;
     fpv_cargo c;
     fpv.fpv_cargo_defaults(&c);
     c.mass = kCargoMassKg;
-    g_cargo.offset.to(c.offset);
-    c.radius = entity_radius(best) * 0.8f;  // a cube's corners stick out of the sphere, its faces don't
+    qrot_inv(f.rotation, centre - at).to(c.offset);
+    c.radius = half;
+    c.line_length = half + kLineSlack;
     fpv.fpv_drone_set_cargo(drone::handle(), &c);
     const char *cls = sdk::classname(best);
     sdk::execf("script p2fpv_fire_nearest(\"%s\", %.2f, %.2f, %.2f, \"DisableMotion\", \"\")", cls, o.x, o.y, o.z);
     g_status = std::string("carrying ") + cls;
-    fpvlog::write("gameplay: grabbed %s, offset %.1f %.1f %.1f", cls, g_cargo.offset.x, g_cargo.offset.y, g_cargo.offset.z);
+    fpvlog::write("gameplay: grabbed %s, %.0f units away, sphere %.1f", cls, (centre - at).length(), half);
 }
 
-// Where the cargo is now, from the drone's pose.
+// Where the cargo is now (libfpv's body on the line), upright along the line.
 bool cargo_pose(Vector &pos, QAngle &ang) {
     if (!g_cargo.active || !g_pinned_valid) return false;
-    pos = g_drone_pos + qrot(g_drone_q, g_cargo.offset);
-    float yaw = sdk::vectors_angles(qrot(g_drone_q, {1, 0, 0}), qrot(g_drone_q, {0, 0, 1})).yaw;
-    ang = g_cargo.angles;
-    ang.yaw += yaw - g_cargo.drone_yaw;
+    void *e = entity(g_cargo.handle);
+    if (!e) return false;
+    // libfpv's position is the cube's centre; the entity's origin may be off it
+    Vector lo = sdk::get<Vector>(e, "m_Collision.m_vecMins"), hi = sdk::get<Vector>(e, "m_Collision.m_vecMaxs");
+    Vector mid = (lo + hi) * 0.5f;
+    Vector up = g_cargo.up.normalized();
+    float drone_yaw = sdk::vectors_angles(qrot(g_drone_q, {1, 0, 0}), qrot(g_drone_q, {0, 0, 1})).yaw;
+    Vector f;
+    sdk::angle_vectors({0, drone_yaw + g_cargo.yaw, 0}, &f, nullptr, nullptr);
+    f = (f - up * f.dot(up)).normalized();
+    if (f.length() < 0.5f) f = up.cross({0, 1, 0}).normalized();
+    ang = sdk::vectors_angles(f, up);
+    Vector r = f.cross(up);  // Source's right of forward / up
+    pos = g_cargo.pos - (f * mid.x - r * mid.y + up * mid.z);
     return true;
 }
 
@@ -595,14 +639,19 @@ void turret_damage() {
     if (!eye || !d) return;
     int hp = sdk::get<int>(eye, "m_iHealth", kEyeHealth);
     if (hp >= kEyeHealth) return;
-    int lost = kEyeHealth - hp;
-    // a turret's burst is about 3 damage per bullet: a dozen bullets break a prop
-    fpv.fpv_drone_damage_props(d, int(g_server_time * 1000) % 4, std::min(1.0f, lost * 0.03f));
     sdk::execf("script p2fpv_health(\"%s\", %d)", kEyeName, kEyeHealth);
-    g_status = "shot";
+    hit(kEyeHealth - hp);
 }
 
 }  // namespace
+
+void hit(int damage) {
+    fpv_drone *d = drone::handle();
+    if (!d || damage <= 0) return;
+    // a turret's burst is about 3 damage per bullet: a dozen bullets break a prop
+    fpv.fpv_drone_damage_props(d, int(g_server_time * 1000) % 4, std::min(1.0f, damage * 0.03f));
+    g_status = "shot";
+}
 
 // --- public ---------------------------------------------------------------------------------
 
@@ -610,9 +659,9 @@ void declare_controls() {
     fpv_control_desc c[4];
     std::memset(c, 0, sizeof c);
     struct D { uint32_t id; const char *name, *label; uint32_t kind; int key, pad; } const defs[] = {
-        {kFireBlue, "portal2.fire_blue", "Fire blue portal", FPV_CONTROL_BUTTON, '1', FPV_GAMEPAD_LEFT_TRIGGER},
-        {kFireOrange, "portal2.fire_orange", "Fire orange portal", FPV_CONTROL_BUTTON, '2', FPV_GAMEPAD_RIGHT_TRIGGER},
-        {kUse, "portal2.use", "Use (press a button)", FPV_CONTROL_BUTTON, 'E', FPV_GAMEPAD_WEST},
+        {kFireBlue, "portal2.fire_blue", "Fire blue portal", FPV_CONTROL_INSTANT, '1', FPV_GAMEPAD_LEFT_TRIGGER},
+        {kFireOrange, "portal2.fire_orange", "Fire orange portal", FPV_CONTROL_INSTANT, '2', FPV_GAMEPAD_RIGHT_TRIGGER},
+        {kUse, "portal2.use", "Use (press a button)", FPV_CONTROL_INSTANT, 'E', FPV_GAMEPAD_WEST},
         {kGrab, "portal2.grab", "Grab / drop a cube", FPV_CONTROL_SWITCH, 'G', FPV_GAMEPAD_LEFT_SHOULDER},
     };
     for (int i = 0; i < 4; i++) {
@@ -634,6 +683,7 @@ void on_launch(const float pos[3]) {
     g_pinned_valid = false;
     g_fizzle = false;
     g_drowned = false;
+    g_wrecked = false;
     g_passes_seen = 0;
     g_cargo = Carried{};
     g_fling = Fling{};
@@ -681,6 +731,7 @@ void server_activate() {
 void add_own_entities(sdk::TraceFilter &filter) {
     filter.add(entity(g_model));
     filter.add(entity(g_eye));
+    filter.add(sdk::player());  // hidden while a drone flies, and maybe standing in right where it is
     if (g_cargo.active) filter.add(entity(g_cargo.handle));
 }
 
@@ -704,6 +755,17 @@ void client_tick(const fpv_frame &f, float dt, bool mouse) {
     g_drone_vel = Vector(f.velocity);
     std::memcpy(g_drone_q, f.rotation, sizeof g_drone_q);
     g_pinned_valid = true;
+    if (g_cargo.active && (f.cargo_flags & FPV_CARGO_CARRIED)) {
+        g_cargo.pos = Vector(f.cargo_position);
+        g_cargo.vel = Vector(f.cargo_velocity);
+        // upright along a taut line, back to upright when it is slack and lifted; as it lay on the ground
+        Vector want = g_cargo.up;
+        Vector line = g_drone_pos - g_cargo.pos;
+        if (f.cargo_flags & FPV_CARGO_LINE_TAUT) want = line.normalized();
+        float k = std::min(1.0f, dt * 8);
+        Vector up = g_cargo.up + (want - g_cargo.up) * k;
+        if (up.length() > 0.1f) g_cargo.up = up.normalized();
+    }
 
     uint32_t blue = 0, orange = 0, use_n = 0, grab_n = 0;
     fpv.fpv_control_poll(kFireBlue, &blue);
@@ -731,6 +793,15 @@ void client_tick(const fpv_frame &f, float dt, bool mouse) {
         fpv.fpv_drone_set_cargo(drone::handle(), nullptr);
     }
 
+    if (kamikaze::wrecked(f) != g_wrecked) {
+        g_wrecked = !g_wrecked;
+        if (g_wrecked) drop();
+        sdk::execf("ent_fire %s %s", kModelName, g_wrecked ? "DisableDraw" : "EnableDraw");
+        // the blast hurt the turrets' target too: not the next drone's damage
+        sdk::execf("script p2fpv_health(\"%s\", %d)", kEyeName, kEyeHealth);
+    }
+    if (g_wrecked) return;
+
     if (f.portal_passes != g_passes_seen) {
         g_passes_seen = f.portal_passes;
         g_fling.active = false;  // the arc was on this side
@@ -739,7 +810,7 @@ void client_tick(const fpv_frame &f, float dt, bool mouse) {
     impacts(f);
     for (auto &kv : g_cooldown) kv.second -= dt;
     // out of the world (a pit with no floor, or through a gap in the brushes)
-    if (void *p = sdk::player(); p && f.position[2] < sdk::abs_origin(p).z - 4000) g_drowned = true;
+    if (f.position[2] < pilot::spot().z - 4000) g_drowned = true;
     if (g_drowned) {
         g_drowned = false;
         fpvlog::write("gameplay: lost (goo or out of the world) at %.0f %.0f %.0f", f.position[0], f.position[1],
@@ -760,13 +831,13 @@ void client_tick(const fpv_frame &f, float dt, bool mouse) {
 }
 
 void server_tick() {
-    if (!drone::handle() || !g_pinned_valid || sdk::is_paused()) return;
+    if (!drone::handle() || !g_pinned_valid || sdk::is_paused() || g_wrecked) return;
     float dt = sdk::I.globals ? sdk::I.globals->interval_per_tick : 1.0f / 60;
     g_server_time += dt;
     // the bullseye (behind the lens) and the model where the drone is, for the
     // server: turrets, lasers, the PVS; the client is pinned every frame
-    Vector fwd = qrot(g_drone_q, {1, 0, 0}), up = qrot(g_drone_q, {0, 0, 1});
-    QAngle a = sdk::vectors_angles(fwd, up);
+    Vector fwd = qrot(g_drone_q, {1, 0, 0});
+    QAngle a = model_angles(g_drone_q);
     Vector eye = g_drone_pos - fwd * kEyeBehind;
     sdk::execf("script p2fpv_place(\"%s\", %.2f, %.2f, %.2f, 0, 0, 0)", kEyeName, eye.x, eye.y, eye.z);
     sdk::execf("script p2fpv_place(\"%s\", %.2f, %.2f, %.2f, %.2f, %.2f, %.2f)", kModelName, g_drone_pos.x, g_drone_pos.y,
@@ -793,6 +864,7 @@ void server_tick() {
     }
     hazards(dt);
     turret_damage();
+    pilot::server_tick();
     static std::string logged;
     if (g_status != logged) logged = g_status, fpvlog::write("gameplay: status '%s'", g_status.c_str());
 }
@@ -814,8 +886,7 @@ void pin_visuals(const fpv_frame &f) {
             if (off >= 0) *reinterpret_cast<QAngle *>(static_cast<char *>(c) + off) = ang;
         }
     };
-    Vector fwd = qrot(f.rotation, {1, 0, 0}), up = qrot(f.rotation, {0, 0, 1});
-    pin(g_model, Vector(f.position), sdk::vectors_angles(fwd, up));
+    pin(g_model, Vector(f.position), model_angles(f.rotation));
     // the props: blades when they stand still, a blurred disc when they spin
     if (void *server = sdk::entity_from_handle(g_model)) {
         if (void *c = sdk::client_entity(sdk::entity_index(server))) {

@@ -10,6 +10,10 @@
 
 namespace gameplay {
 
+// Writes and runs the VScript helpers (p2fpv_*). Loading a save resets the
+// script VM, so call it before relying on them.
+void install_script();
+
 // libfpv is loaded: the game controls for the radio, keys and gamepad.
 void declare_controls();
 
@@ -36,6 +40,10 @@ void pin_visuals(const fpv_frame &f);
 // For devtools' autotest: presses the drone's controls as the radio would.
 enum class Action { FireBlue, FireOrange, Use, GrabOn, GrabOff };
 void press(Action a);
+
+// The game hurt the drone (turret bullets, lasers, its stand-in Chell):
+// Source damage points, turned into broken props.
+void hit(int damage);
 
 // For devtools' status: what the drone carries, and the last action.
 const char *status();
