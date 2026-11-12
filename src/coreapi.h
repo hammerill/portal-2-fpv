@@ -6,16 +6,18 @@
 
 #include <libfpv.h>
 
+#include "guest.h"
+
 struct IDirect3DDevice9;
 
 namespace coreapi {
 
-using CreateInterfaceFn = void *(*)(const char *name, int *returnCode);
-
 struct LoaderContext {
     uint32_t size;
-    CreateInterfaceFn engine_factory;  // from IServerPluginCallbacks::Load
-    CreateInterfaceFn server_factory;
+    guest::addr engine_factory;  // from IServerPluginCallbacks::Load (game functions)
+    guest::addr server_factory;
+    // macOS: source-recomp's host table (rt_plugin.h), nullptr on Windows
+    const void *host;
     // libfpv keeps its log callback for the life of the process: it lives in
     // the loader, which is never unloaded (docs/INTEGRATION.md#building-and-loading).
     fpv_log_fn libfpv_log;
@@ -31,6 +33,7 @@ struct LoaderContext {
 //   void p2fpv_core_server_activate()           - the map's entities exist, precaching is still allowed
 //   void p2fpv_core_level_shutdown()
 //   void p2fpv_core_present(IDirect3DDevice9 *) - the render thread, right before Present
+//                                                (macOS: the native Metal device)
 //   void p2fpv_core_device_reset()              - the render thread, before IDirect3DDevice9::Reset
 using LoadFn = bool (*)(const LoaderContext *);
 using VoidFn = void (*)();

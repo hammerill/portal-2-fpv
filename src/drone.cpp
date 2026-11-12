@@ -1,7 +1,5 @@
 #include "drone.h"
 
-#include <windows.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -14,67 +12,12 @@
 #include "kamikaze.h"
 #include "log.h"
 #include "pilot.h"
+#include "platform.h"
 #include "render.h"
 #include "world.h"
 
 namespace drone {
 namespace {
-
-// Source pins the OS cursor to the window's centre every frame (inputsystem.dll's
-// SetCursorPosition, vgui2's too), even with cl_mouseenable 0, so the overlay's
-// cursor could not move. While the overlay is open those modules' SetCursorPos
-// imports point here and do nothing.
-BOOL WINAPI no_set_cursor_pos(int, int) { return TRUE; }
-
-void **find_import(HMODULE m, const char *dll, const char *fn) {
-    auto base = reinterpret_cast<uint8_t *>(m);
-    auto dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-    auto &dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) return nullptr;
-    for (auto d = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(base + dir.VirtualAddress); d->Name; ++d) {
-        if (_stricmp(reinterpret_cast<char *>(base + d->Name), dll) != 0 || !d->OriginalFirstThunk) continue;
-        auto names = reinterpret_cast<IMAGE_THUNK_DATA *>(base + d->OriginalFirstThunk);
-        auto slots = reinterpret_cast<IMAGE_THUNK_DATA *>(base + d->FirstThunk);
-        for (; names->u1.AddressOfData; ++names, ++slots) {
-            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
-            auto by_name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(base + names->u1.AddressOfData);
-            if (strcmp(reinterpret_cast<char *>(by_name->Name), fn) == 0) return reinterpret_cast<void **>(&slots->u1.Function);
-        }
-    }
-    return nullptr;
-}
-
-struct CursorPin {
-    void **slot = nullptr;
-    void *original = nullptr;
-};
-CursorPin g_cursor_pins[2];
-
-void write_slot(void **slot, void *value) {
-    DWORD old;
-    if (!VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old)) return;
-    *slot = value;
-    VirtualProtect(slot, sizeof(void *), old, &old);
-}
-
-void free_cursor(bool free) {
-    static const char *const modules[] = {"inputsystem.dll", "vgui2.dll"};
-    for (int i = 0; i < 2; ++i) {
-        CursorPin &p = g_cursor_pins[i];
-        if (free && !p.slot) {
-            HMODULE m = GetModuleHandleA(modules[i]);
-            void **slot = m ? find_import(m, "user32.dll", "SetCursorPos") : nullptr;
-            if (!slot) continue;
-            p.slot = slot;
-            p.original = *slot;
-            write_slot(slot, reinterpret_cast<void *>(&no_set_cursor_pos));
-        } else if (!free && p.slot) {
-            write_slot(p.slot, p.original);
-            p = {};
-        }
-    }
-}
 
 using fpvapi::fpv;
 using sdk::QAngle;
@@ -95,7 +38,7 @@ bool g_pilot = false;        // F: back to Chell, the drone left in the world
 bool g_hud_hidden = false;   // our convars are set for a drone view
 QAngle g_hold_angles;        // Chell's view while she stands still
 float g_age = 0;
-LARGE_INTEGER g_last{};
+double g_last = 0;
 
 std::mutex g_snap_mutex;
 fpv_frame g_snap{};
@@ -103,37 +46,34 @@ bool g_snap_fpv = false, g_snap_no_signal = false;
 
 // --- keys -------------------------------------------------------------------------------
 
-bool game_has_focus() {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    return pid == GetCurrentProcessId();
-}
+using input::Key;
+
+bool game_has_focus() { return input::focused(); }
 
 // The drone's keyboard (libfpv's fallback sticks and switches, the overlay's
 // keys and the game controls), by physical position for the letters. In the
 // pilot view the letters are Chell's, so libfpv sees them released, unless
 // the overlay is open and wants them.
 void forward_keys() {
-    struct Key { int vk; int fpv; UINT sc = 0; bool flight = false; };
-    static const Key keys[] = {
-        {0, 'W', 0x11, true}, {0, 'A', 0x1E, true}, {0, 'S', 0x1F, true}, {0, 'D', 0x20, true},
-        {0, 'T', 0x14, true}, {0, 'B', 0x30, true}, {0, 'E', 0x12, true}, {0, 'G', 0x22, true},
-        {0, '1', 0x02, true}, {0, '2', 0x03, true},
-        {VK_RETURN, FPV_KEY_ENTER, 0, true}, {VK_LEFT, FPV_KEY_LEFT, 0, true}, {VK_RIGHT, FPV_KEY_RIGHT, 0, true},
-        {VK_UP, FPV_KEY_UP, 0, true}, {VK_DOWN, FPV_KEY_DOWN, 0, true}, {VK_F8, FPV_KEY_F8}, {VK_ESCAPE, FPV_KEY_ESCAPE},
-        {VK_TAB, FPV_KEY_TAB}, {VK_BACK, FPV_KEY_BACKSPACE}, {VK_SPACE, FPV_KEY_SPACE}, {VK_DELETE, FPV_KEY_DELETE},
+    struct K { Key key; int fpv; bool flight; };
+    static const K keys[] = {
+        {Key::W, 'W', true}, {Key::A, 'A', true}, {Key::S, 'S', true}, {Key::D, 'D', true},
+        {Key::T, 'T', true}, {Key::B, 'B', true}, {Key::E, 'E', true}, {Key::G, 'G', true},
+        {Key::D1, '1', true}, {Key::D2, '2', true},
+        {Key::Enter, FPV_KEY_ENTER, true}, {Key::Left, FPV_KEY_LEFT, true}, {Key::Right, FPV_KEY_RIGHT, true},
+        {Key::Up, FPV_KEY_UP, true}, {Key::Down, FPV_KEY_DOWN, true}, {Key::F8, FPV_KEY_F8, false},
+        {Key::Escape, FPV_KEY_ESCAPE, false}, {Key::Tab, FPV_KEY_TAB, false}, {Key::Backspace, FPV_KEY_BACKSPACE, false},
+        {Key::Space, FPV_KEY_SPACE, false}, {Key::Delete, FPV_KEY_DELETE, false},
 #if defined(LIBFPV_KAMIKAZE)
-        {0, 'K', 0x25, true}, {0, 'X', 0x2D, true},  // bomb arm, explode
+        {Key::K, 'K', true}, {Key::X, 'X', true},  // bomb arm, explode
 #endif
     };
     bool flight_keys = (g_drone && !g_pilot) || fpv.fpv_overlay_wants_input();
     static bool was_down[sizeof(keys) / sizeof(keys[0])];
     static bool primed = false;  // a key already held when we start is not a press
     bool focus = game_has_focus();
-    HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), nullptr));
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
-        int vk = keys[i].sc ? int(MapVirtualKeyExW(keys[i].sc, MAPVK_VSC_TO_VK, layout)) : keys[i].vk;
-        bool down = focus && vk && (flight_keys || !keys[i].flight) && (GetAsyncKeyState(vk) & 0x8000) != 0;
+        bool down = focus && (flight_keys || !keys[i].flight) && input::key_down(keys[i].key);
         if (primed && down != was_down[i]) fpv.fpv_input_key(keys[i].fpv, down);
         was_down[i] = down;
     }
@@ -141,19 +81,14 @@ void forward_keys() {
 }
 
 // Edge-detected press; the first reading of a key is only a baseline.
-bool key_pressed(int vk) {
-    static bool was_down[256], seen[256];
-    bool down = game_has_focus() && (GetAsyncKeyState(vk) & 0x8000) != 0;
-    bool pressed = seen[vk] && down && !was_down[vk];
-    was_down[vk] = down;
-    seen[vk] = true;
+bool key_pressed(Key k) {
+    static bool was_down[int(Key::Count)], seen[int(Key::Count)];
+    int i = int(k);
+    bool down = game_has_focus() && input::key_down(k);
+    bool pressed = seen[i] && down && !was_down[i];
+    was_down[i] = down;
+    seen[i] = true;
     return pressed;
-}
-
-// Letters by their physical position, as libfpv does (Y is the key right of T).
-int letter_vk(UINT scan) {
-    HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), nullptr));
-    return int(MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK, layout));
 }
 
 // --- HUD and Chell -----------------------------------------------------------------------
@@ -377,7 +312,7 @@ void snapshot() {
 void load(fpv_log_fn log) { g_log = log; }
 
 void unload() {
-    free_cursor(false);
+    input::free_cursor(false);
     if (g_drone) stop();
     hide_hud(false);
 }
@@ -471,15 +406,13 @@ void respawn_at(const float pos[3], float yaw) {
 
 void on_view(sdk::CViewSetup *view) {
     if (!sdk::in_game()) return;
-    LARGE_INTEGER now, freq;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    float dt = g_last.QuadPart ? float(now.QuadPart - g_last.QuadPart) / float(freq.QuadPart) : 0.016f;
+    double now = platform::seconds();
+    float dt = g_last > 0 ? float(now - g_last) : 0.016f;
     g_last = now;
     dt = std::min(dt, 0.25f);
 
     if (!fpvapi::loaded()) {
-        bool f7 = key_pressed(VK_F7), f8 = key_pressed(VK_F8);
+        bool f7 = key_pressed(Key::F7), f8 = key_pressed(Key::F8);
         if (f7 || f8) {
             fpvlog::write("%s pressed, loading libfpv", f7 ? "F7" : "F8");
             if (load_libfpv()) {
@@ -497,13 +430,13 @@ void on_view(sdk::CViewSetup *view) {
         mouse_freed = overlay_open;
         sdk::uncheat("cl_mouseenable");
         sdk::exec(overlay_open ? "cl_mouseenable 0" : "cl_mouseenable 1");
-        free_cursor(overlay_open);
+        input::free_cursor(overlay_open);
     }
     bool move_chell = false;
     for (uint32_t id; (id = fpv.fpv_overlay_poll_action()) != 0;) move_chell |= id == kMoveChellAction;
     bool typing = fpv.fpv_overlay_wants_input() != 0;
-    bool f7 = key_pressed(VK_F7), cam = key_pressed(letter_vk(0x2E)), reset = key_pressed(letter_vk(0x13)),
-         y = key_pressed(letter_vk(0x15)), pilot = key_pressed(letter_vk(0x21));
+    bool f7 = key_pressed(Key::F7), cam = key_pressed(Key::C), reset = key_pressed(Key::R), y = key_pressed(Key::Y),
+         pilot = key_pressed(Key::F);
     if (!typing) {
         if (f7) {
             if (!g_drone) launch();

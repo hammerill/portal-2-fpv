@@ -24,6 +24,8 @@
 
 using namespace coreapi;
 
+using CreateInterfaceFn = void *(*)(const char *name, int *returnCode);
+
 namespace {
 
 // --- the core ---------------------------------------------------------------------
@@ -392,8 +394,9 @@ public:
     virtual bool Load(CreateInterfaceFn interfaceFactory, CreateInterfaceFn gameServerFactory) {
         fpvlog::write("loader: portal2-fpv %s %s, in %s", __DATE__, __TIME__, paths::mod_dir().c_str());
         g_ctx.size = sizeof g_ctx;
-        g_ctx.engine_factory = interfaceFactory;
-        g_ctx.server_factory = gameServerFactory;
+        g_ctx.engine_factory = guest::g(reinterpret_cast<void *>(interfaceFactory));
+        g_ctx.server_factory = guest::g(reinterpret_cast<void *>(gameServerFactory));
+        g_ctx.host = nullptr;
         g_ctx.libfpv_log = &libfpv_log;
         g_ctx.in_level = false;
         g_ctx.map_name = "";

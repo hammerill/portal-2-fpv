@@ -1,9 +1,11 @@
 // A minimal Source engine SDK for Portal 2 (build 2.0.0.1, 32-bit), written
 // for this mod: no Valve SDK headers. Vtable indices and struct layouts are
 // those SourceAutoRecord uses for the current Portal 2 build
-// (https://github.com/p2sr/SourceAutoRecord, MIT); entity fields are looked
-// up by name at runtime in the game's own datamaps and network tables, so they
-// follow the game's layout.
+// (https://github.com/p2sr/SourceAutoRecord, MIT), for Windows and for Linux
+// (the build source-recomp runs on macOS); entity fields are looked up by
+// name at runtime in the game's own datamaps and network tables, so they
+// follow the game's layout. Pointers inside engine structures are 32-bit
+// game addresses (guest.h).
 #pragma once
 
 #include <cmath>
@@ -11,6 +13,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "guest.h"
 
 namespace sdk {
 
@@ -55,21 +59,16 @@ QAngle vectors_angles(const Vector &forward, const Vector &up);
 
 // --- vtables ---------------------------------------------------------------------------
 
-template <typename R, typename... A>
-inline R vcall(const void *self, int index, A... args) {
-    using Fn = R(__thiscall *)(const void *, A...);
-    return (*reinterpret_cast<Fn *const *>(self))[index](self, args...);
-}
+using guest::vcall;
 
-// Swaps one slot of a vtable (shared by every object of the class); restore()
-// puts the original back. Main thread only.
+// Swaps one slot of a vtable (shared by every object of the class) for a
+// function the game can call (guest.h); restore() puts the original back.
+// Main thread only.
 struct VtableHook {
-    void **slot = nullptr;
-    void *original = nullptr;
-    bool install(void *object, int index, void *fn);
+    guest::addr slot = 0;
+    guest::addr original = 0;
+    bool install(void *object, int index, guest::addr fn);
     void restore();
-    template <typename T>
-    T orig() const { return reinterpret_cast<T>(original); }
 };
 
 // --- engine structures -------------------------------------------------------------------
@@ -89,7 +88,7 @@ struct CViewSetup {
 };
 
 struct CUserCmd {
-    void *vmt;
+    guest::addr vmt;
     int command_number, tick_count;
     QAngle viewangles;
     float forwardmove, sidemove, upmove;
@@ -114,42 +113,33 @@ enum : uint32_t {
 
 struct Ray {
     VectorAligned start, delta, start_offset, extents;
-    const void *world_axis_transform = nullptr;
+    guest::addr world_axis_transform = 0;
     bool is_ray = true, is_swept = true;
     Ray(const Vector &from, const Vector &to) : start(from), delta(to - from) {
         is_swept = (to - from).length() > 0;
     }
 };
 
+// A trace's result, read out of the engine's (CGameTrace) into mod pointers.
 struct CGameTrace {
     Vector startpos, endpos;
     struct {
         Vector normal;
         float dist;
-        unsigned char type, signbits, pad[2];
     } plane;
-    float fraction;
-    int contents;
-    unsigned short dispFlags;
-    bool allsolid, startsolid;
-    float fractionleftsolid;
+    float fraction = 1;
+    int contents = 0;
+    bool allsolid = false, startsolid = false;
     struct {
-        const char *name;
-        short surfaceProps;
-        unsigned short flags;
+        const char *name = nullptr;  // nullptr if unreadable
     } surface;
-    int hitgroup;
-    short physicsbone;
-    unsigned short worldSurfaceIndex;
-    void *ent;  // CBaseEntity* (server)
-    int hitbox;
+    void *ent = nullptr;  // CBaseEntity* (server)
 };
+// A CGameTrace in the engine's layout (`raw`, game memory), read out.
+CGameTrace read_trace(const void *raw);
 
-// ITraceFilter: implemented here, called by the engine.
-class TraceFilter {
-public:
-    virtual bool ShouldHitEntity(void *handle_entity, int contents_mask);
-    virtual int GetTraceType() { return 0; }  // TRACE_EVERYTHING
+// What a trace passes through (the engine's ITraceFilter is made from it).
+struct TraceFilter {
     void *skip[8] = {};
     int skip_count = 0;
     void add(void *ent) {
@@ -186,7 +176,11 @@ struct Interfaces {
 extern Interfaces I;
 
 // Resolves everything above; logs and returns false on what is missing.
-bool init(void *(*engine_factory)(const char *, int *), void *(*server_factory)(const char *, int *));
+// The factories are IServerPluginCallbacks::Load's, game functions.
+bool init(guest::addr engine_factory, guest::addr server_factory);
+// The vtable functions the engine calls on the mod's trace filters (macOS:
+// defined anew by each core).
+void install_callbacks();
 
 // --- engine helpers -------------------------------------------------------------------------
 
@@ -250,8 +244,9 @@ bool readable_str(const char *s);
 // IEngineTool::PrecacheModel (61, SAR); late precaching works in single player.
 int precache_model(const char *path);
 
-// A code pattern ("55 8B EC ?? ...") in a loaded module, or 0.
-uintptr_t scan(const char *module, const char *pattern);
+// A code pattern ("55 8B EC ?? ...") in a loaded module ("server": server.dll
+// or server.so), or 0.
+guest::addr scan(const char *module, const char *pattern);
 
 // Same for client entities (C_BaseEntity* from IClientEntityList).
 void *client_entity(int index);

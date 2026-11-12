@@ -1,5 +1,6 @@
 #include "crash.h"
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
 
@@ -104,3 +105,21 @@ void uninstall() {
 void note(const char *w) { g_note = w; }
 
 }  // namespace crash
+
+#else  // macOS: source-recomp reports faults itself (the game's log names the guest
+       // address and the host stack), so only the last step is kept.
+
+#include <atomic>
+
+#include "log.h"
+
+namespace crash {
+namespace {
+std::atomic<const char *> g_note{"(none)"};
+}
+void install() {}
+void uninstall() {}
+void note(const char *where) { g_note = where; }
+}  // namespace crash
+
+#endif

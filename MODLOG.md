@@ -169,6 +169,22 @@ docs/INTEGRATION.md or libfpv.h, those win.
   on a radio switch: hysteresis and a 30 ms debounce (a switch held ON
   fired by itself). Not checked in game yet: turrets against the stand-in.
 
+- 2026-11-12, macOS (Apple silicon, Portal 2 recompiled by source-recomp):
+  the mod builds as a native arm64 plugin (portal2-fpv.so, really a dylib,
+  + core.dylib, hot-reloaded) that source-recomp's runtime loads in place of
+  a Linux module (its branch feat/native-plugins: runtime/native_plugin.h).
+  Engine pointers are 32-bit game addresses everywhere (src/guest.h); calls
+  into the game go through the runtime. Linux ABI pitfalls found: vtable
+  indices shift (GCC's two destructor slots; SAR's IEngineTool::PrecacheModel
+  61 is wrong on Linux, 62 is right: 61 wrote a float over the client mode),
+  typedescription_t's inputFunc is a two-word member pointer (64-byte
+  records). Every Linux index checked against the binaries' vtables.
+  Verified in game (kamikaze build): plugin load, hooks, map load, launch,
+  arming and flight, stand-in, OSD, fisheye, chase view, model, F8 overlay,
+  TraceFirePortal (result 8 on black metal). Not checked: a portal placed,
+  the overlay's mouse by hand, a radio, audio by ear, the Windows build after
+  the refactor (it should compile; CI will tell).
+
 ## Next — start here
 
 In game, with the hot reloader (tools/deploy.sh core, tools/p2.sh). After a

@@ -4,6 +4,8 @@ Fly an FPV drone through Aperture's test chambers with your own radio,
 gamepad or keyboard, and solve them with it. This takes about two minutes.
 
 **[Download portal-2-fpv.zip](https://github.com/hammerill/portal-2-fpv/releases/latest/download/portal-2-fpv.zip)**
+(Windows) · **[portal-2-fpv-macos.zip](https://github.com/hammerill/portal-2-fpv/releases/latest/download/portal-2-fpv-macos.zip)**
+(Mac with Apple silicon, [see below](#on-a-mac-apple-silicon))
 
 ## 1. Have the right game
 
@@ -39,6 +41,32 @@ Portal 2/
 ```
 
 Portal 2 loads the mod by itself at startup; there is nothing to enable.
+
+## On a Mac (Apple silicon)
+
+The Mac version runs in **Portal 2 Natif**, the native Mac app that
+[source-recomp](https://github.com/kanapitsas/source-recomp) builds from your
+own Steam copy of Portal 2. The mod needs a source-recomp that loads native
+plugins (a Mac library in place of a Linux one in `addons/`); an older build
+starts the game without the mod.
+
+1. Install Portal 2 Natif with source-recomp and check that the game runs.
+2. Find the Steam game folder: in Steam, right-click Portal 2 > Manage >
+   Browse local files. On a Mac it is usually
+   `~/Library/Application Support/Steam/steamapps/common/Portal 2`. Close
+   the game.
+3. Download [**portal-2-fpv-macos.zip**](https://github.com/hammerill/portal-2-fpv/releases/latest/download/portal-2-fpv-macos.zip)
+   and double-click it to unzip. Copy what is inside its `portal2` folder
+   into the game's `portal2` folder (`addons`, `models`, `materials`;
+   merge folders, don't replace them).
+
+The files are the same as on Windows, with Mac libraries:
+`addons/portal2-fpv/portal2-fpv.so` (a Mac library: the game's Linux engine
+asks for that name), `core.dylib` and `libfpv.dylib`. Start **Portal 2 Natif**
+and fly as below. Settings live in `~/Library/Application Support/libfpv`; the
+log is `addons/portal2-fpv/portal2-fpv.log` in the game folder, and the
+game's own log is `~/Library/Logs/Portal2Natif.log`. Updating and
+uninstalling are as on Windows, with these files.
 
 ## 3. Fly
 

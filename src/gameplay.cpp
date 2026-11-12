@@ -1,7 +1,5 @@
 #include "gameplay.h"
 
-#include <windows.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +13,7 @@
 #include "log.h"
 #include "paths.h"
 #include "pilot.h"
+#include "platform.h"
 #include "world.h"
 
 namespace gameplay {
@@ -104,15 +103,7 @@ Vector qrot_inv(const float q[4], const Vector &v) {
 
 void sound(const char *name) { sdk::execf("playgamesound %s", name); }
 
-std::string game_dir() {
-    std::string d = paths::mod_dir();  // ...\portal2\addons\portal2-fpv
-    for (int i = 0; i < 2; i++) d = d.substr(0, d.find_last_of("\\/"));
-    return d;
-}
-
-bool file_exists(const std::string &rel) {
-    return GetFileAttributesA((game_dir() + "\\" + rel).c_str()) != INVALID_FILE_ATTRIBUTES;
-}
+bool file_exists(const std::string &rel) { return platform::file_exists(paths::game_dir() + "/" + rel); }
 
 const char *model_path() { return file_exists(kModel) ? kModel : kPlaceholderModel; }
 
@@ -161,7 +152,7 @@ const char *const kScript = R"NUT(// portal2-fpv: helpers the plugin calls with 
 }  // namespace
 
 void install_script() {
-    std::string path = game_dir() + "\\scripts\\vscripts\\p2fpv.nut";
+    std::string path = paths::game_dir() + "/scripts/vscripts/p2fpv.nut";
     std::string have;
     if (FILE *f = std::fopen(path.c_str(), "rb")) {
         char buf[4096];
@@ -170,8 +161,8 @@ void install_script() {
         std::fclose(f);
     }
     if (have != kScript) {
-        CreateDirectoryA((game_dir() + "\\scripts").c_str(), nullptr);
-        CreateDirectoryA((game_dir() + "\\scripts\\vscripts").c_str(), nullptr);
+        platform::make_dir(paths::game_dir() + "/scripts");
+        platform::make_dir(paths::game_dir() + "/scripts/vscripts");
         if (FILE *f = std::fopen(path.c_str(), "wb")) {
             std::fwrite(kScript, 1, std::strlen(kScript), f);
             std::fclose(f);
@@ -263,24 +254,27 @@ void spawn_entities(const Vector &at) {
 
 // --- portals from the drone -------------------------------------------------------------------
 
-using TraceFirePortalFn = int(__thiscall *)(void *gun, const Vector &origin, const Vector &dir, bool orange, int placed_by,
-                                             void *info);
-using FindPortalFn = void *(__cdecl *)(char linkage, bool orange, bool create);
-TraceFirePortalFn g_trace_fire_portal = nullptr;
-FindPortalFn g_find_portal = nullptr;
+// CWeaponPortalgun::TraceFirePortal (a method) and FindPortal (a function),
+// SourceAutoRecord's patterns for the current Portal 2.
+guest::addr g_trace_fire_portal = 0, g_find_portal = 0;
 
 void find_portal_functions() {
     static bool done = false;
     if (done) return;
     done = true;
-    // SourceAutoRecord's patterns for the current Portal 2 (CWeaponPortalgun::TraceFirePortal, FindPortal)
-    g_trace_fire_portal = reinterpret_cast<TraceFirePortalFn>(sdk::scan(
-        "server.dll", "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 81 EC 38 07 00 00 56 57 8B F1"));
-    g_find_portal = reinterpret_cast<FindPortalFn>(sdk::scan(
-        "server.dll",
-        "55 8B EC 0F B6 45 08 8D 0C 80 03 C9 53 8B 9C 09 ? ? ? ? 03 C9 56 57 85 DB 74 3C 8B B9 ? ? ? ? 33 C0 33 F6 EB 08"));
-    fpvlog::write("gameplay: TraceFirePortal %p, FindPortal %p", reinterpret_cast<void *>(g_trace_fire_portal),
-                  reinterpret_cast<void *>(g_find_portal));
+#if P2FPV_RECOMP
+    g_trace_fire_portal = sdk::scan("server", "55 89 E5 57 56 8D B5 F4 F8 FF FF 53 81 EC 30 07 00 00 8B 45 14 6A 00 8B 5D 0C "
+                                              "FF 75 08 56 89 85 D0 F8 FF FF");
+    g_find_portal = sdk::scan("server", "55 57 56 53 83 EC 2C 8B 44 24 40 8B 74 24 48 8B 7C 24 44 89 44 24 14 0F B6 C0 8D 04 "
+                                        "80 89 74 24 0C C1 E0 02");
+#else
+    g_trace_fire_portal =
+        sdk::scan("server", "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 81 EC 38 07 00 00 56 57 8B F1");
+    g_find_portal = sdk::scan(
+        "server",
+        "55 8B EC 0F B6 45 08 8D 0C 80 03 C9 53 8B 9C 09 ? ? ? ? 03 C9 56 57 85 DB 74 3C 8B B9 ? ? ? ? 33 C0 33 F6 EB 08");
+#endif
+    fpvlog::write("gameplay: TraceFirePortal %08x, FindPortal %08x", g_trace_fire_portal, g_find_portal);
 }
 
 // Fires a portal along the drone's camera, by the portal gun's own rules
@@ -303,29 +297,35 @@ void fire_portal(const fpv_frame &f, bool orange) {
         const char *field = o ? "m_hSecondaryPortal" : "m_hPrimaryPortal";
         uint32_t *h = sdk::field<uint32_t>(gun, field);
         if (h && !sdk::entity_from_handle(*h)) {
-            void *p = g_find_portal(char(linkage), o, true);
+            void *p = guest::call<void *>(g_find_portal, int(linkage), o, true);
             if (p) *h = sdk::handle_of(p);
         }
     }
     // TracePortalPlacementInfo_t: result, final position, final angles, helper, trace
-    alignas(16) uint8_t info[512] = {};
+    guest::Scratch scratch;
+    auto *info = static_cast<uint8_t *>(guest::scratch(512));
     Vector origin(f.camera.position), dir(f.camera.forward);
     {
         EyeNotSolid pass;
-        g_trace_fire_portal(gun, origin, dir, orange, 2, info);
+        // (this, const Vector &origin, const Vector &dir, bool orange, int placed_by, TracePortalPlacementInfo_t &)
+        guest::thiscall<int>(g_trace_fire_portal, gun, guest::temp(origin), guest::temp(dir), orange, 2,
+                             static_cast<void *>(info));
     }
-    int result = *reinterpret_cast<int *>(info);
-    Vector pos = *reinterpret_cast<Vector *>(info + 4);
-    QAngle ang = *reinterpret_cast<QAngle *>(info + 16);
+    int result;
+    Vector pos;
+    QAngle ang;
+    std::memcpy(&result, info, 4);
+    std::memcpy(static_cast<void *>(&pos), info + 4, sizeof pos);
+    std::memcpy(static_cast<void *>(&ang), info + 16, sizeof ang);
     sound(orange ? "Weapon_Portalgun.fire_red" : "Weapon_Portalgun.fire_blue");
     {
-        const auto &tr = *reinterpret_cast<const sdk::CGameTrace *>(info + 32);
+        const sdk::CGameTrace tr = sdk::read_trace(info + 32);
         fpvlog::write("gameplay: fire %s from %.0f %.0f %.0f dir %.2f %.2f %.2f: result %d at %.0f %.0f %.0f; trace %.0f %.0f %.0f "
                       "-> %.0f %.0f %.0f frac %.2f startsolid %d contents %x surface '%s' ent %s",
                       orange ? "orange" : "blue", origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, result, pos.x, pos.y,
                       pos.z, tr.startpos.x, tr.startpos.y, tr.startpos.z, tr.endpos.x, tr.endpos.y, tr.endpos.z,
                       tr.fraction, int(tr.startsolid), tr.contents,
-                      tr.surface.name && sdk::readable_str(tr.surface.name) ? tr.surface.name : "?",
+                      tr.surface.name ? tr.surface.name : "?",
                       tr.ent ? sdk::classname(tr.ent) : "-");
     }
     if (result > 2) {  // CANT_FIT, CLEANSER, OVERLAP_*, INVALID_*, PASSTHROUGH
@@ -779,7 +779,7 @@ void client_tick(const fpv_frame &f, float dt, bool mouse) {
         grab_on = g_forced_grab != 0;
     }
     static bool lmb = false, rmb = false;
-    bool l = mouse && (GetAsyncKeyState(VK_LBUTTON) & 0x8000), r = mouse && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+    bool l = mouse && input::mouse_down(0), r = mouse && input::mouse_down(1);
     if (l && !lmb) blue++;
     if (r && !rmb) orange++;
     lmb = l, rmb = r;

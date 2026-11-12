@@ -1,22 +1,26 @@
 #include "paths.h"
 
-#include <windows.h>
+#include "platform.h"
 
 namespace paths {
 
 std::string mod_dir() {
-    HMODULE self = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCSTR>(&mod_dir), &self);
-    char path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
-    std::string dir(path, n);
-    return dir.substr(0, dir.find_last_of("\\/"));
+    std::string d = platform::module_dir(reinterpret_cast<const void *>(&mod_dir));
+    // macOS: the core runs from a copy in core-live/ (loader_mac.cpp)
+    size_t slash = d.find_last_of("\\/");
+    if (slash != std::string::npos && d.compare(slash + 1, std::string::npos, "core-live") == 0) d.resize(slash);
+    return d;
 }
 
 std::string data_dir() {
-    std::string d = mod_dir() + "\\fpv-data";
-    CreateDirectoryA(d.c_str(), nullptr);
+    std::string d = mod_dir() + "/fpv-data";
+    platform::make_dir(d);
+    return d;
+}
+
+std::string game_dir() {
+    std::string d = mod_dir();  // .../portal2/addons/portal2-fpv
+    for (int i = 0; i < 2; i++) d = d.substr(0, d.find_last_of("\\/"));
     return d;
 }
 

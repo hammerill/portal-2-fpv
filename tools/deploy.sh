@@ -15,6 +15,8 @@
 # the release flavour (libfpv's build/win32, the mod's build).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
+# macOS (Portal 2 recompiled by source-recomp): its own build and folders
+[ "$(uname)" = Darwin ] && exec "$here/tools/deploy-mac.sh" "$@"
 game="${PORTAL2_DIR:-/mnt/d/SteamLibrary/steamapps/common/Portal 2}"
 libfpv="${LIBFPV_DIR:-$HOME/Projects/libfpv}"
 dest="$game/portal2/addons/portal2-fpv"

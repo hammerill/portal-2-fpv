@@ -1,8 +1,9 @@
-# Every push to main builds the mod and the latest libfpv for 32-bit Windows
-# and publishes portal-2-fpv.zip as a new GitHub release. The ZIP's contents
-# go straight into the "Portal 2" folder; docs/INSTALL.md becomes the release
-# page. Run it by hand (Actions > Release > Run workflow) to pick up a new
-# libfpv.
+# Every push to main builds the mod and the latest libfpv, for 32-bit Windows
+# and for macOS on Apple silicon (Portal 2 recompiled by source-recomp), and
+# publishes both as one GitHub release: portal-2-fpv.zip (Windows) and
+# portal-2-fpv-macos.zip. Each ZIP's contents go straight into the "Portal 2"
+# folder; docs/INSTALL.md becomes the release page. Run it by hand
+# (Actions > Release > Run workflow) to pick up a new libfpv.
 name: Release
 
 on:
@@ -18,7 +19,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # Both builds use the same libfpv commit, even if libfpv moves meanwhile.
+  libfpv:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - id: head
+        run: echo "sha=$(git ls-remote https://github.com/hammerill/libfpv.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: libfpv
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: hammerill/libfpv
+          ref: ${{ needs.libfpv.outputs.sha }}
           path: libfpv
           # Top level only: SimITL's own nested submodules use SSH URLs, and
           # libfpv builds from its flattened copies in third_party/ instead.
@@ -70,22 +82,97 @@ jobs:
           (cd dist/pkg && zip -9r ../portal-2-fpv.zip portal2)
           unzip -l dist/portal-2-fpv.zip
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/portal-2-fpv.zip
+          if-no-files-found: error
+
+  macos:
+    needs: libfpv
+    runs-on: macos-15  # Apple silicon: the mod is arm64, like source-recomp's game
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: portal-2-fpv
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hammerill/libfpv
+          ref: ${{ needs.libfpv.outputs.sha }}
+          path: libfpv
+          submodules: true
+
+      - name: Build libfpv (arm64)
+        run: |
+          cmake -S libfpv -B libfpv/build/mac -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DLIBFPV_BUILD_TESTS=OFF -DLIBFPV_BUILD_EXAMPLES=OFF
+          cmake --build libfpv/build/mac -j"$(sysctl -n hw.ncpu)" --target fpv
+
+      - name: Build the mod
+        run: |
+          cmake -S portal-2-fpv -B portal-2-fpv/build/mac -DCMAKE_BUILD_TYPE=Release \
+            -DLIBFPV_DIR="$GITHUB_WORKSPACE/libfpv"
+          cmake --build portal-2-fpv/build/mac -j"$(sysctl -n hw.ncpu)"
+
+      # The same layout as the Windows ZIP, for the Steam "Portal 2" folder
+      # that source-recomp's app reads. portal2-fpv.so is an arm64 dylib: the
+      # recompiled Linux engine asks for that name, and source-recomp loads
+      # it natively. libfpv.dylib is copied, not the symlink chain.
+      # Settings live in ~/Library/Application Support/libfpv.
+      - name: Package
+        run: |
+          pkg=dist/pkg/portal2
+          mkdir -p "$pkg/addons/portal2-fpv"
+          cp portal-2-fpv/addons/portal2-fpv.vdf "$pkg/addons/"
+          cp portal-2-fpv/build/mac/portal2-fpv.so portal-2-fpv/build/mac/core.dylib "$pkg/addons/portal2-fpv/"
+          cp -L libfpv/build/mac/libfpv.dylib "$pkg/addons/portal2-fpv/libfpv.dylib"
+          cp libfpv/LICENSE "$pkg/addons/portal2-fpv/libfpv.LICENSE.txt"
+          cp -R portal-2-fpv/content/. "$pkg/"
+          for f in "$pkg"/addons/portal2-fpv/*.so "$pkg"/addons/portal2-fpv/*.dylib; do
+            lipo -archs "$f" | grep -qx arm64 || { echo "$f is not arm64-only: $(lipo -archs "$f")"; exit 1; }
+            codesign --force --sign - "$f"  # ad hoc, as the linker does; explicit after the copy
+          done
+          nm -gU "$pkg/addons/portal2-fpv/portal2-fpv.so" | grep -q rt_native_plugin_init
+          (cd dist/pkg && zip -9r --symlinks ../portal-2-fpv-macos.zip portal2)
+          unzip -l dist/portal-2-fpv-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/portal-2-fpv-macos.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [libfpv, windows, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: portal-2-fpv
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          LIB_SHA: ${{ needs.libfpv.outputs.sha }}
         run: |
+          ls -la dist
           mod_sha=$(git -C portal-2-fpv rev-parse HEAD)
-          lib_sha=$(git -C libfpv rev-parse HEAD)
           {
             cat portal-2-fpv/docs/INSTALL.md
             echo
             echo "## This build"
             echo
             echo "- portal-2-fpv [\`${mod_sha:0:7}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${mod_sha}): $(git -C portal-2-fpv log -1 --format=%s)"
-            echo "- libfpv [\`${lib_sha:0:7}\`](https://github.com/hammerill/libfpv/commit/${lib_sha}) (source of \`libfpv.dll\`, GPL-3.0-or-later)"
+            echo "- libfpv [\`${LIB_SHA:0:7}\`](https://github.com/hammerill/libfpv/commit/${LIB_SHA}) (source of \`libfpv.dll\` and \`libfpv.dylib\`, GPL-3.0-or-later)"
           } > dist/notes.md
           tag="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" dist/portal-2-fpv.zip \
+          gh release create "$tag" dist/portal-2-fpv.zip dist/portal-2-fpv-macos.zip \
             --repo "$GITHUB_REPOSITORY" \
             --target "$mod_sha" \
             --title "Portal 2 FPV build ${GITHUB_RUN_NUMBER} ($(date -u +%Y-%m-%d))" \

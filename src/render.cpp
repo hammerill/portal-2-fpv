@@ -1,7 +1,5 @@
 #include "render.h"
 
-#include <windows.h>
-
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -12,6 +10,7 @@
 #include "fpvapi.h"
 #include "log.h"
 #include "paths.h"
+#include "platform.h"
 
 namespace render {
 namespace {
@@ -31,7 +30,7 @@ struct Texture {
 };
 Texture g_textures[3];  // indexed by FPV_TEXTURE_* (1 overlay font, 2 OSD font)
 std::vector<Vertex> g_vertices;
-LARGE_INTEGER g_last;
+double g_last = 0;
 std::atomic<float> g_aspect{16.0f / 9.0f};
 
 // Fisheye: a copy of the finished frame, drawn back through a warped grid.
@@ -242,9 +241,9 @@ bool draw_static(IDirect3DDevice9 *dev, float w, float h) {
 // Window capture from outside does not always work (a WSL in session 0).
 void save_screenshot(IDirect3DDevice9 *dev, IDirect3DSurface9 *backbuffer, const D3DSURFACE_DESC &desc) {
     static int frames = 0;
-    static const std::string data = paths::data_dir(), trigger = data + "\\shot.txt";
-    if (++frames % 10 != 0 || GetFileAttributesA(trigger.c_str()) == INVALID_FILE_ATTRIBUTES) return;
-    DeleteFileA(trigger.c_str());
+    static const std::string data = paths::data_dir(), trigger = data + "/shot.txt";
+    if (++frames % 10 != 0 || !platform::file_exists(trigger)) return;
+    platform::remove_file(trigger);
     IDirect3DSurface9 *rt = nullptr, *mem = nullptr;
     bool ok = SUCCEEDED(dev->CreateRenderTarget(desc.Width, desc.Height, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
                                                 &rt, nullptr)) &&
@@ -254,25 +253,25 @@ void save_screenshot(IDirect3DDevice9 *dev, IDirect3DSurface9 *backbuffer, const
               SUCCEEDED(dev->GetRenderTargetData(rt, mem));
     D3DLOCKED_RECT lr;
     if (ok && SUCCEEDED(mem->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
-        CreateDirectoryA((data + "\\shots").c_str(), nullptr);
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        char path[MAX_PATH];
-        snprintf(path, sizeof path, "%s\\shots\\%02d%02d%02d-%03d.bmp", data.c_str(), t.wHour, t.wMinute,
-                 t.wSecond, t.wMilliseconds);
+        platform::make_dir(data + "/shots");
+        int th, tm, ts, tms;
+        platform::local_time(th, tm, ts, tms);
+        char path[1024];
+        snprintf(path, sizeof path, "%s/shots/%02d%02d%02d-%03d.bmp", data.c_str(), th, tm, ts, tms);
         if (FILE *f = std::fopen(path, "wb")) {
-            BITMAPFILEHEADER fh{};
-            BITMAPINFOHEADER ih{};
-            ih.biSize = sizeof ih;
-            ih.biWidth = LONG(desc.Width);
-            ih.biHeight = -LONG(desc.Height);  // top-down
-            ih.biPlanes = 1;
-            ih.biBitCount = 32;
-            fh.bfType = 0x4d42;
-            fh.bfOffBits = sizeof fh + sizeof ih;
-            fh.bfSize = fh.bfOffBits + desc.Width * desc.Height * 4;
-            std::fwrite(&fh, sizeof fh, 1, f);
-            std::fwrite(&ih, sizeof ih, 1, f);
+            // BITMAPFILEHEADER (14 bytes) and BITMAPINFOHEADER (40), little-endian; top-down rows
+            uint8_t hdr[54] = {'B', 'M'};
+            auto put = [&](int at, uint32_t v, int n) {
+                for (int i = 0; i < n; ++i) hdr[at + i] = uint8_t(v >> (8 * i));
+            };
+            put(2, 54 + desc.Width * desc.Height * 4, 4);
+            put(10, 54, 4);
+            put(14, 40, 4);
+            put(18, desc.Width, 4);
+            put(22, uint32_t(-int32_t(desc.Height)), 4);
+            put(26, 1, 2);
+            put(28, 32, 2);
+            std::fwrite(hdr, sizeof hdr, 1, f);
             for (UINT y = 0; y < desc.Height; ++y)
                 std::fwrite(static_cast<uint8_t *>(lr.pBits) + size_t(y) * lr.Pitch, 4, desc.Width, f);
             std::fclose(f);
@@ -287,18 +286,13 @@ void save_screenshot(IDirect3DDevice9 *dev, IDirect3DSurface9 *backbuffer, const
 }
 
 // Mouse for the overlay, in back buffer pixels.
-void feed_mouse(IDirect3DDevice9 *dev, float w, float h) {
-    D3DDEVICE_CREATION_PARAMETERS cp;
-    if (FAILED(dev->GetCreationParameters(&cp)) || !cp.hFocusWindow) return;
-    POINT p;
-    RECT rc;
-    if (!GetCursorPos(&p) || !ScreenToClient(cp.hFocusWindow, &p) || !GetClientRect(cp.hFocusWindow, &rc)) return;
-    float sx = rc.right > 0 ? w / float(rc.right) : 1.0f, sy = rc.bottom > 0 ? h / float(rc.bottom) : 1.0f;
-    fpv.fpv_overlay_mouse_move(float(p.x) * sx, float(p.y) * sy);
+void feed_mouse(float w, float h) {
+    float x, y;
+    if (!input::cursor(w, h, x, y)) return;
+    fpv.fpv_overlay_mouse_move(x, y);
     static bool was[3];
-    const int vk[3] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
     for (int b = 0; b < 3; ++b) {
-        bool down = (GetAsyncKeyState(vk[b]) & 0x8000) != 0;
+        bool down = input::mouse_down(b);
         if (down != was[b]) fpv.fpv_overlay_mouse_button(b, down);
         was[b] = down;
     }
@@ -393,10 +387,8 @@ void frame(IDirect3DDevice9 *dev, bool in_game) {
         return;
     }
 
-    LARGE_INTEGER now, freq;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    float dt = g_last.QuadPart ? float(now.QuadPart - g_last.QuadPart) / float(freq.QuadPart) : 0.016f;
+    double now = platform::seconds();
+    float dt = g_last > 0 ? float(now - g_last) : 0.016f;
     g_last = now;
 
     IDirect3DSurface9 *backbuffer = nullptr;
@@ -408,7 +400,7 @@ void frame(IDirect3DDevice9 *dev, bool in_game) {
     g_aspect = w / h;
 
     fpv.fpv_overlay_set_display(w, h, h > 1080.0f ? h / 1080.0f : 1.0f);
-    if (fpv.fpv_overlay_is_open()) feed_mouse(dev, w, h);
+    if (fpv.fpv_overlay_is_open()) feed_mouse(w, h);
 
     static fpv_frame snapshot;
     const fpv_draw_data *osd = nullptr;

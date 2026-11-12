@@ -5,8 +5,12 @@
 namespace paths {
 
 // The folder this module (the loader or the core) was loaded from:
-// "...\Portal 2\portal2\addons\portal2-fpv".
+// "...\Portal 2\portal2\addons\portal2-fpv" ("/" on macOS; "/" joins
+// paths on both).
 std::string mod_dir();
+
+// The game folder ("...\Portal 2\portal2"), two levels up.
+std::string game_dir();
 
 // fpv-data in the mod's folder: the developer triggers (cmd.txt, shot.txt,
 // autotest.txt), status.txt and screenshots.

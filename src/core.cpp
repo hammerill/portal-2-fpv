@@ -1,9 +1,8 @@
 // core.dll: the mod, loaded and hot-reloaded by portal2-fpv.dll (loader.cpp).
 // Everything here runs on the game's main thread, except p2fpv_core_present
 // and p2fpv_core_render_release (the render thread).
-#include <windows.h>
-
 #include <atomic>
+#include <cstring>
 
 #include "coreapi.h"
 #include "crash.h"
@@ -14,6 +13,7 @@
 #include "kamikaze.h"
 #include "log.h"
 #include "pilot.h"
+#include "platform.h"
 #include "render.h"
 #include "sdk.h"
 #include "world.h"
@@ -26,31 +26,54 @@ LoaderContext g_ctx{};
 bool g_ready = false;
 std::atomic<bool> g_in_game{false};
 
-// ClientModeShared: OverrideView (18), CreateMove (24) for the current Portal 2.
+// ClientModeShared: OverrideView and CreateMove for the current Portal 2
+// (SourceAutoRecord; GCC's two destructor slots shift them on Linux).
+#if P2FPV_RECOMP
+constexpr int kOverrideView = 19, kCreateMove = 25;
+#else
 constexpr int kOverrideView = 18, kCreateMove = 24;
+#endif
 sdk::VtableHook g_override_view, g_create_move;
 
-using OverrideViewFn = void(__thiscall *)(void *, sdk::CViewSetup *);
-using CreateMoveFn = bool(__thiscall *)(void *, float, sdk::CUserCmd *);
-
-void __thiscall override_view(void *self, sdk::CViewSetup *view) {
-    g_override_view.orig<OverrideViewFn>()(self, view);
+void on_override_view(void *self, sdk::CViewSetup *view) {
+    guest::thiscall<void>(g_override_view.original, self, view);
     g_in_game = sdk::in_game();
-    static LARGE_INTEGER last{};
-    LARGE_INTEGER now, freq;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    float dt = last.QuadPart ? float(now.QuadPart - last.QuadPart) / float(freq.QuadPart) : 0.016f;
+    static double last = 0;
+    double now = platform::seconds();
+    float dt = last > 0 ? float(now - last) : 0.016f;
     last = now;
     devtools::frame(dt > 0.25f ? 0.25f : dt);
     drone::on_view(view);
 }
 
-bool __thiscall create_move(void *self, float sample_time, sdk::CUserCmd *cmd) {
-    bool r = g_create_move.orig<CreateMoveFn>()(self, sample_time, cmd);
+bool on_create_move(void *self, float sample_time, sdk::CUserCmd *cmd) {
+    bool r = guest::thiscall<bool>(g_create_move.original, self, sample_time, cmd);
     drone::on_create_move(cmd);
     return r;
 }
+
+// The functions the game calls in the client mode's vtable.
+#if P2FPV_RECOMP
+const RtPluginHost *host() { return guest::host; }
+void override_view_entry(void *, guest::addr args, void *) {
+    on_override_view(guest::h(guest::r32(args)), guest::at<sdk::CViewSetup>(guest::r32(args + 4)));
+}
+void create_move_entry(void *cpu, guest::addr args, void *) {
+    float sample_time;
+    std::memcpy(&sample_time, guest::h(args + 4), 4);
+    bool r = on_create_move(guest::h(guest::r32(args)), sample_time, guest::at<sdk::CUserCmd>(guest::r32(args + 8)));
+    host()->set_return(cpu, r ? 1 : 0);
+}
+guest::addr override_view_fn() { return host()->define("p2fpv.ClientMode.OverrideView", &override_view_entry, nullptr); }
+guest::addr create_move_fn() { return host()->define("p2fpv.ClientMode.CreateMove", &create_move_entry, nullptr); }
+#else
+void __thiscall override_view_entry(void *self, sdk::CViewSetup *view) { on_override_view(self, view); }
+bool __thiscall create_move_entry(void *self, float sample_time, sdk::CUserCmd *cmd) {
+    return on_create_move(self, sample_time, cmd);
+}
+guest::addr override_view_fn() { return guest::g(reinterpret_cast<void *>(&override_view_entry)); }
+guest::addr create_move_fn() { return guest::g(reinterpret_cast<void *>(&create_move_entry)); }
+#endif
 
 // Portal 2 binds F7 to "load quick"; libfpv games launch the drone with it.
 // The mod takes it while loaded and gives it back when unloaded.
@@ -65,8 +88,8 @@ void take_f7(bool take) {
 // plugin can load before client.dll is ready): retried on server frames.
 bool start() {
     if (!sdk::init(g_ctx.engine_factory, g_ctx.server_factory)) return false;
-    bool ok = g_override_view.install(sdk::I.client_mode, kOverrideView, reinterpret_cast<void *>(&override_view)) &&
-              g_create_move.install(sdk::I.client_mode, kCreateMove, reinterpret_cast<void *>(&create_move));
+    bool ok = g_override_view.install(sdk::I.client_mode, kOverrideView, override_view_fn()) &&
+              g_create_move.install(sdk::I.client_mode, kCreateMove, create_move_fn());
     fpvlog::write("core: client mode hooks %s", ok ? "installed" : "FAILED");
     if (!ok) {
         g_override_view.restore();
@@ -90,17 +113,26 @@ bool start() {
     return true;
 }
 
+#if defined(_WIN32)
+#define CORE_EXPORT __declspec(dllexport)
+#else
+#define CORE_EXPORT __attribute__((visibility("default")))
+#endif
+
 extern "C" {
 
-__declspec(dllexport) bool p2fpv_core_load(const LoaderContext *ctx) {
+CORE_EXPORT bool p2fpv_core_load(const LoaderContext *ctx) {
     g_ctx = *ctx;
+#if P2FPV_RECOMP
+    guest::host = static_cast<const RtPluginHost *>(ctx->host);
+#endif
     crash::install();
     fpvlog::write("core: built %s %s, map '%s'", __DATE__, __TIME__, ctx->map_name ? ctx->map_name : "");
     if (!start()) fpvlog::write("core: the engine isn't ready yet; trying again on the next server frames");
     return true;
 }
 
-__declspec(dllexport) void p2fpv_core_unload() {
+CORE_EXPORT void p2fpv_core_unload() {
     if (!g_ready) return;
     drone::unload();
     world::reset();
@@ -113,11 +145,11 @@ __declspec(dllexport) void p2fpv_core_unload() {
     crash::uninstall();
 }
 
-__declspec(dllexport) void p2fpv_core_game_frame(bool) {
+CORE_EXPORT void p2fpv_core_game_frame(bool) {
     if (!g_ready) {
-        static DWORD last = 0;
+        static uint32_t last = 0;
         static int tries = 0;
-        DWORD now = GetTickCount();
+        uint32_t now = platform::ticks_ms();
         if (tries >= 10 || now - last < 1000) return;
         last = now;
         if (!start() && ++tries == 10) fpvlog::write("core: the engine interfaces never all came up; idle");
@@ -127,15 +159,15 @@ __declspec(dllexport) void p2fpv_core_game_frame(bool) {
     devtools::tick();
 }
 
-__declspec(dllexport) void p2fpv_core_level_init(const char *map) {
+CORE_EXPORT void p2fpv_core_level_init(const char *map) {
     if (g_ready) fpvlog::write("core: level %s", map);
 }
 
-__declspec(dllexport) void p2fpv_core_server_activate() {
+CORE_EXPORT void p2fpv_core_server_activate() {
     if (g_ready) gameplay::server_activate();
 }
 
-__declspec(dllexport) void p2fpv_core_level_shutdown() {
+CORE_EXPORT void p2fpv_core_level_shutdown() {
     if (!g_ready) return;
     drone::level_shutdown();
     gameplay::level_shutdown();
@@ -143,14 +175,14 @@ __declspec(dllexport) void p2fpv_core_level_shutdown() {
     g_in_game = false;
 }
 
-__declspec(dllexport) void p2fpv_core_present(IDirect3DDevice9 *dev) {
+CORE_EXPORT void p2fpv_core_present(IDirect3DDevice9 *dev) {
     if (g_ready) render::frame(dev, g_in_game);
 }
 
-__declspec(dllexport) void p2fpv_core_device_reset() { render::release(); }
+CORE_EXPORT void p2fpv_core_device_reset() { render::release(); }
 
 // The loader calls this on the render thread before unloading the core: the
 // D3D9 objects are released where they are used.
-__declspec(dllexport) void p2fpv_core_render_release() { render::release(); }
+CORE_EXPORT void p2fpv_core_render_release() { render::release(); }
 
 }  // extern "C"

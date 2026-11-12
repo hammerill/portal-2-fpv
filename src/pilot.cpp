@@ -1,12 +1,11 @@
 #include "pilot.h"
 
-#include <windows.h>
-
 #include <cstdio>
 
 #include "fpvapi.h"
 #include "gameplay.h"
 #include "log.h"
+#include "platform.h"
 
 namespace pilot {
 namespace {
@@ -50,7 +49,7 @@ int g_health = 100;  // hers before the stand-in
 // already, as far as the spot and the next stand-in are concerned.
 bool g_going_home = false;
 Vector g_home;
-DWORD g_home_since = 0;
+uint32_t g_home_since = 0;
 
 Vector feet() { return sdk::abs_origin(sdk::player()); }
 
@@ -61,29 +60,26 @@ void draw(bool on) {
     sdk::execf("script p2fpv_draw_player(%d)", on ? 1 : 0);
 }
 
-// The game's view vectors (CViewVectors, server.dll): the player's movement
+// The game's view vectors (CViewVectors, in server.dll / server.so): the player's movement
 // resets her view offset to their m_vView every tick, so writing the offset
 // alone lasted until the next player command. While she stands in, m_vView
 // is the drone's centre seen from her feet (straight down kFeetAboveDrone).
-float *view_vectors() {
-    static float *vv = nullptr;
+guest::addr view_vectors() {
+    static guest::addr vv = 0;
     static bool searched = false;
     if (searched) return vv;
     searched = true;
     // m_vView (0 0 64), m_vHullMin (-16 -16 0), m_vHullMax (16 16 72)
-    vv = reinterpret_cast<float *>(sdk::scan(
-        "server.dll", "00 00 00 00 00 00 00 00 00 00 80 42 00 00 80 C1 00 00 80 C1 00 00 00 00 00 00 80 41 00 00 80 41 00 00 90 42"));
-    fpvlog::write("pilot: view vectors at %p", static_cast<void *>(vv));
+    vv = sdk::scan("server",
+                   "00 00 00 00 00 00 00 00 00 00 80 42 00 00 80 C1 00 00 80 C1 00 00 00 00 00 00 80 41 00 00 80 41 00 00 90 42");
+    fpvlog::write("pilot: view vectors at %08x", vv);
     return vv;
 }
 
 void set_view_height(float z) {
-    float *vv = view_vectors();
-    if (!vv) return;
-    DWORD old;
-    if (!VirtualProtect(vv, 3 * sizeof(float), PAGE_READWRITE, &old)) return;
-    vv[0] = 0, vv[1] = 0, vv[2] = z;
-    VirtualProtect(vv, 3 * sizeof(float), old, &old);
+    guest::addr vv = view_vectors();
+    const float v[3] = {0, 0, z};
+    if (vv) guest::patch(vv, v, sizeof v);
 }
 
 // She becomes the drone for the game: targeted and hurt there (the hurt goes
@@ -127,7 +123,7 @@ Vector spot_of_stand_in() {
 
 // Still on her way home (see g_going_home).
 bool going_home() {
-    if (g_going_home && ((feet() - g_home).length() < 8 || GetTickCount() - g_home_since > 500)) g_going_home = false;
+    if (g_going_home && ((feet() - g_home).length() < 8 || platform::ticks_ms() - g_home_since > 500)) g_going_home = false;
     return g_going_home;
 }
 
@@ -140,7 +136,7 @@ void stop_standing_in(bool go_home) {
         sdk::execf("script p2fpv_move_player(%.2f, %.2f, %.2f)", at.x, at.y, at.z + 1);
         g_going_home = true;
         g_home = at;
-        g_home_since = GetTickCount();
+        g_home_since = platform::ticks_ms();
     }
     set_standing_in(false);
     fpvlog::write("pilot: stand-in ends%s", go_home ? ", Chell back at her spot" : "");

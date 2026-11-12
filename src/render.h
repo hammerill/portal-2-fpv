@@ -2,7 +2,11 @@
 // frame (D3D9, right before Present, on the render thread).
 #pragma once
 
+#if defined(_WIN32)
 #include <d3d9.h>
+#else
+#include "d3d9_mac.h"  // the native device of source-recomp's Metal renderer
+#endif
 
 namespace render {
 

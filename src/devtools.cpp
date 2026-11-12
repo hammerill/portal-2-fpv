@@ -1,7 +1,5 @@
 #include "devtools.h"
 
-#include <windows.h>
-
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -13,6 +11,7 @@
 #include "gameplay.h"
 #include "log.h"
 #include "paths.h"
+#include "platform.h"
 #include "pilot.h"
 #include "sdk.h"
 #include "world.h"
@@ -34,16 +33,16 @@ bool read_file(const std::string &path, std::string &out) {
 }
 
 void write_status() {
-    static DWORD last = 0;
-    DWORD now = GetTickCount();
+    static uint32_t last = 0;
+    uint32_t now = platform::ticks_ms();
     if (now - last < 500) return;
     last = now;
-    std::string path = paths::data_dir() + "\\status.txt";
+    std::string path = paths::data_dir() + "/status.txt";
     FILE *f = std::fopen((path + ".tmp").c_str(), "w");
     if (!f) return;
     void *p = sdk::player();
     sdk::Vector feet = sdk::abs_origin(p);
-    std::fprintf(f, "time %lu\nin_game %d paused %d\nchell %.1f %.1f %.1f health %d\n", now, int(sdk::in_game()),
+    std::fprintf(f, "time %u\nin_game %d paused %d\nchell %.1f %.1f %.1f health %d\n", now, int(sdk::in_game()),
                  int(sdk::is_paused()), feet.x, feet.y, feet.z, sdk::get<int>(p, "m_iHealth", -1));
     std::fprintf(f, "chell_state flags 0x%x movetype %d effects 0x%x takedamage %d\n", sdk::get<int>(p, "m_fFlags", -1),
                  int(sdk::get<uint8_t>(p, "m_MoveType", 0xFF)), sdk::get<int>(p, "m_fEffects", -1),
@@ -135,13 +134,13 @@ void write_status() {
                      int(sdk::get<bool>(e, "m_bLaserOn", false)), a.x, a.y, a.z, b.x, b.y, b.z);
     }
     std::fclose(f);
-    MoveFileExA((path + ".tmp").c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    platform::replace_file(path + ".tmp", path);
 }
 
 void dumps() {
-    std::string path = paths::data_dir() + "\\dump.txt", text;
+    std::string path = paths::data_dir() + "/dump.txt", text;
     if (!read_file(path, text)) return;
-    DeleteFileA(path.c_str());
+    platform::remove_file(path);
     std::istringstream in(text);
     std::string cls;
     while (in >> cls) {
@@ -150,7 +149,7 @@ void dumps() {
         else if (cls == "weapon") e = sdk::entity_from_handle(sdk::get<uint32_t>(sdk::player(), "m_hActiveWeapon", 0xFFFFFFFFu));
         else e = sdk::find_entity(cls.c_str());
         std::string out = e ? sdk::dump_fields(e) : "no " + cls;
-        if (FILE *f = std::fopen((paths::data_dir() + "\\dump-" + cls + ".txt").c_str(), "w")) {
+        if (FILE *f = std::fopen((paths::data_dir() + "/dump-" + cls + ".txt").c_str(), "w")) {
             for (char &c : out)
                 if (c == ' ') c = '\n';
             std::fputs(out.c_str(), f);
@@ -250,8 +249,8 @@ void tick() {
 }
 
 void frame(float dt) {
-    std::string path = paths::data_dir() + "\\autotest.txt";
-    bool exists = GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    std::string path = paths::data_dir() + "/autotest.txt";
+    bool exists = platform::file_exists(path);
     if (!fpvapi::loaded() && !(exists && drone::load_libfpv())) return;
     if (!g_running && exists) {
         std::string text;
@@ -265,7 +264,7 @@ void frame(float dt) {
     if (!g_running) return;
     if (!exists || g_step >= g_steps.size()) {
         g_running = false;
-        DeleteFileA(path.c_str());
+        platform::remove_file(path);
         fpv.fpv_input_clear_channels();
         fpvlog::write("autotest: done");
         return;

@@ -9,7 +9,14 @@
 #   tools/p2.sh dump class...       every field of an entity class (or player / weapon)
 #   tools/p2.sh autotest file|-     a scripted flight (src/devtools.h has the format)
 set -euo pipefail
-game="${PORTAL2_DIR:-/mnt/d/SteamLibrary/steamapps/common/Portal 2}"
+if [ "$(uname)" = Darwin ]; then
+  game="${PORTAL2_DIR:-$HOME/Library/Application Support/Steam/steamapps/common/Portal 2}"
+  # what the game writes (the console log) goes to source-recomp's user folder
+  user="${PORTAL2_USER_DIR:-$HOME/Library/Application Support/Portal 2 Natif/userdata}"
+else
+  game="${PORTAL2_DIR:-/mnt/d/SteamLibrary/steamapps/common/Portal 2}"
+  user="$game"
+fi
 mod="$game/portal2/addons/portal2-fpv"
 data="$mod/fpv-data"
 mkdir -p "$data"
@@ -18,7 +25,7 @@ case "$what" in
   cmd) printf '%s\n' "$@" >> "$data/cmd.txt" ;;
   status) cat "$data/status.txt" ;;
   log) tail -n "${1:-40}" "$mod/portal2-fpv.log" ;;
-  console) tail -n "${1:-40}" "$data/console.log" ;;
+  console) tail -n "${1:-40}" "$user/portal2/addons/portal2-fpv/fpv-data/console.log" ;;
   shot)
     out="${1:-/tmp/p2shot.png}"
     before="$(ls -t "$data/shots" 2>/dev/null | head -1 || true)"
@@ -28,7 +35,11 @@ case "$what" in
       latest="$(ls -t "$data/shots" 2>/dev/null | head -1 || true)"
       if [ -n "$latest" ] && [ "$latest" != "$before" ]; then
         sleep 0.3
-        ffmpeg -loglevel error -y -i "$data/shots/$latest" -vf "scale='min(1280,iw)':-2" "$out"
+        if command -v ffmpeg >/dev/null; then
+          ffmpeg -loglevel error -y -i "$data/shots/$latest" -vf "scale='min(1280,iw)':-2" "$out"
+        else
+          sips -s format png "$data/shots/$latest" --out "$out" >/dev/null
+        fi
         echo "$out"; exit 0
       fi
     done
