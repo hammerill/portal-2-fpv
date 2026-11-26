@@ -12,7 +12,9 @@
 # KAMIKAZE=1 (or in tools/deploy.local.sh, not in git) deploys a local
 # development build against a kamikaze libfpv (libfpv's build/win32-kamikaze,
 # the mod's build-kamikaze); never shipped, CI builds without. The default is
-# the release flavour (libfpv's build/win32, the mod's build).
+# kamikaze on a kamikaze dev machine (LIBFPV_KAMIKAZE_DEV=1 or true, libfpv
+# CLAUDE.md), else the release flavour (libfpv's build/win32, the mod's build).
+# The two must be of one kind: fpv_frame's layout differs.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 # macOS (Portal 2 recompiled by source-recomp): its own build and folders
@@ -22,7 +24,8 @@ libfpv="${LIBFPV_DIR:-$HOME/Projects/libfpv}"
 dest="$game/portal2/addons/portal2-fpv"
 mode="${1:-all}"
 [ -f "$here/tools/deploy.local.sh" ] && . "$here/tools/deploy.local.sh"
-kamikaze="${KAMIKAZE:-0}"
+case "${LIBFPV_KAMIKAZE_DEV:-}" in 1|true) dev_kamikaze=1 ;; *) dev_kamikaze=0 ;; esac
+kamikaze="${KAMIKAZE:-$dev_kamikaze}"
 
 if [ "$kamikaze" = 1 ]; then
   libbuild="$libfpv/build/win32-kamikaze" build="$here/build-kamikaze" kflag=ON
@@ -48,6 +51,15 @@ if ! out="$(cmake --build "$build" -j"$(nproc)" 2>&1)"; then
   exit 1
 fi
 echo "$out" | grep -E "warning" || true
+# the mod and libfpv of one kind, or the mod reads every frame shifted
+mod_kflag="$(sed -n 's/^P2FPV_KAMIKAZE:BOOL=//p' "$build/CMakeCache.txt")"
+lib_kflag=OFF
+grep -q fpv_kamikaze_poll_detonation "$libbuild/libfpv.dll" && lib_kflag=ON
+if [ "$mod_kflag" != "$kflag" ] || [ "$lib_kflag" != "$kflag" ]; then
+  echo "kamikaze mismatch: wanted $kflag, the mod ($build) is $mod_kflag, libfpv ($libbuild) is $lib_kflag: nothing deployed" >&2
+  echo "  cmake -S . -B $build -DP2FPV_KAMIKAZE=$kflag (and libfpv's -DLIBFPV_KAMIKAZE=$kflag)" >&2
+  exit 1
+fi
 
 mkdir -p "$dest/fpv-data"
 # A running game locks the loader and libfpv, but Windows lets a loaded DLL be

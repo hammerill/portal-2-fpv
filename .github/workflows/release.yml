@@ -61,7 +61,7 @@ jobs:
         run: |
           cmake -S portal-2-fpv -B portal-2-fpv/build \
             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/portal-2-fpv/cmake/mingw-w64-i686.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Release -DP2FPV_KAMIKAZE=OFF \
             -DLIBFPV_DIR="$GITHUB_WORKSPACE/libfpv"
           cmake --build portal-2-fpv/build -j"$(nproc)"
 
@@ -111,7 +111,7 @@ jobs:
 
       - name: Build the mod
         run: |
-          cmake -S portal-2-fpv -B portal-2-fpv/build/mac -DCMAKE_BUILD_TYPE=Release \
+          cmake -S portal-2-fpv -B portal-2-fpv/build/mac -DCMAKE_BUILD_TYPE=Release -DP2FPV_KAMIKAZE=OFF \
             -DLIBFPV_DIR="$GITHUB_WORKSPACE/libfpv"
           cmake --build portal-2-fpv/build/mac -j"$(sysctl -n hw.ncpu)"
 

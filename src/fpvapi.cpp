@@ -162,6 +162,24 @@ bool load(fpv_log_fn log) {
         return false;
     }
     clean_live_dir(dll);
+    // libfpv.h lays fpv_frame out differently with LIBFPV_KAMIKAZE (12 radio
+    // channels instead of 10): a libfpv of the other kind would fill the frame
+    // 8 bytes off from where the mod reads it (wind, impacts, the video feed).
+    // Refuse it instead (libfpv docs/INTEGRATION.md "Build the game for the
+    // same kind of libfpv").
+    bool lib_kamikaze = symbol(lib, "fpv_kamikaze_poll_detonation") != nullptr;
+#if defined(LIBFPV_KAMIKAZE)
+    const bool mod_kamikaze = true;
+#else
+    const bool mod_kamikaze = false;
+#endif
+    if (lib_kamikaze != mod_kamikaze) {
+        fpvlog::write("libfpv is a %s build but this mod was built for a %s one: not loaded (build the mod with "
+                      "-DP2FPV_KAMIKAZE=%s)",
+                      lib_kamikaze ? "kamikaze" : "plain", mod_kamikaze ? "kamikaze" : "plain",
+                      lib_kamikaze ? "ON" : "OFF");
+        return false;
+    }
     bool ok = true;
 #define FPV_FN(name)                                                                                     \
     fpv.name = reinterpret_cast<decltype(fpv.name)>(symbol(lib, #name));                                 \

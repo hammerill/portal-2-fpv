@@ -2,8 +2,16 @@ cmake_minimum_required(VERSION 3.24)
 
 set(LIBFPV_DIR "$ENV{HOME}/Projects/libfpv" CACHE PATH "libfpv source checkout")
 # Local development builds only (tools/deploy.sh), never CI or releases: must
-# match a libfpv built with -DLIBFPV_KAMIKAZE=ON (the frame's layout changes).
-option(P2FPV_KAMIKAZE "Local dev build against a kamikaze libfpv" OFF)
+# match a libfpv built with -DLIBFPV_KAMIKAZE=ON (the frame's layout changes,
+# libfpv docs/INTEGRATION.md "Build the game for the same kind of libfpv").
+# The core refuses a libfpv of the other kind (src/fpvapi.cpp). On a kamikaze
+# dev machine (LIBFPV_KAMIKAZE_DEV=1 or true, libfpv CLAUDE.md) it defaults to
+# ON; CI never sets the variable.
+set(_kamikaze_default OFF)
+if("$ENV{LIBFPV_KAMIKAZE_DEV}" STREQUAL "1" OR "$ENV{LIBFPV_KAMIKAZE_DEV}" STREQUAL "true")
+  set(_kamikaze_default ON)
+endif()
+option(P2FPV_KAMIKAZE "Local dev build against a kamikaze libfpv" ${_kamikaze_default})
 
 if(APPLE)
   # macOS: Portal 2 recompiled by source-recomp (the Linux build, as a native
